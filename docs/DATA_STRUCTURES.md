@@ -1,6 +1,25 @@
 # RozoIntents Data Structures
 
-See [TERMINOLOGY.md](./TERMINOLOGY.md) for field definitions and naming conventions.
+See also:
+- [TERMINOLOGY.md](./TERMINOLOGY.md) - Field definitions and naming conventions
+- [FEE.md](./FEE.md) - Fee structure and calculations
+
+## Token Decimals
+
+Different chains use different decimals for the same token:
+
+| Chain | USDC Decimals | USDT Decimals |
+|-------|---------------|---------------|
+| Ethereum | 6 | 6 |
+| Base | 6 | 6 |
+| Arbitrum | 6 | 6 |
+| Polygon | 6 | 6 |
+| Stellar | 7 | 7 |
+| Solana | 6 | 6 |
+
+**Important:** The `amount` field in `RozoIntent` uses decimals based on `intentType`:
+- `EXACT_IN`: Amount is in **source chain token decimals**
+- `EXACT_OUT`: Amount is in **destination chain token decimals**
 
 ## Core Structs
 
@@ -8,8 +27,8 @@ See [TERMINOLOGY.md](./TERMINOLOGY.md) for field definitions and naming conventi
 
 ```solidity
 enum IntentType {
-    EXACT_IN,      // 0 - Source amount fixed, destination receives (source - fee)
-    EXACT_OUT      // 1 - Destination amount fixed, source pays (destination + fee)
+    EXACT_IN,      // 0 - Amount is source amount (in source token decimals)
+    EXACT_OUT      // 1 - Amount is destination amount (in destination token decimals)
 }
 ```
 
@@ -17,25 +36,22 @@ enum IntentType {
 
 ### RozoIntent
 
-The intent represents a user's cross-chain payment request.
+The intent definition - used for CREATE2 address computation. Does NOT include sender or source token (unknown until deposit).
 
 ```solidity
 struct RozoIntent {
-    // Source chain info (contract lives on source chain)
-    address sender;                  // User who created the intent
-    address sourceToken;             // Token deposited (address(0) = native)
-    uint256 sourceAmount;            // Amount deposited on source chain
-
     // Destination chain info
     uint256 destinationChainId;      // Destination chain ID (e.g., 1500 for Stellar)
     bytes32 receiver;                // Recipient address (bytes32 for cross-chain)
     bytes32 destinationToken;        // Token on destination (bytes32 for non-EVM)
-    uint256 destinationAmount;       // Amount receiver should get
 
-    // Intent configuration
-    IntentType intentType;           // EXACT_IN or EXACT_OUT
+    // Amount (meaning depends on intentType)
+    uint256 amount;                  // EXACT_IN: source amount, EXACT_OUT: destination amount
+    IntentType intentType;           // Determines which chain's decimals to use
+
+    // Metadata
     address refundAddress;           // Where to refund if expired
-    uint256 nonce;                   // Unique identifier per sender
+    uint256 nonce;                   // Unique identifier
     uint256 deadline;                // Expiration timestamp (default: 24h)
 }
 ```
@@ -44,39 +60,46 @@ struct RozoIntent {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `sender` | address | The user initiating the payment |
-| `sourceToken` | address | Token on source chain (address(0) for native ETH/etc) |
-| `sourceAmount` | uint256 | Amount user deposits on source chain |
 | `destinationChainId` | uint256 | Target chain ID (e.g., 1500 for Stellar) |
-| `receiver` | bytes32 | Recipient on destination (bytes32 for non-EVM compatibility) |
-| `destinationToken` | bytes32 | Token to receive on destination (bytes32 for non-EVM) |
-| `destinationAmount` | uint256 | Amount receiver should get on destination |
-| `intentType` | IntentType | EXACT_IN (default) or EXACT_OUT |
-| `refundAddress` | address | Where to send funds if intent expires |
-| `nonce` | uint256 | Unique per sender, prevents replay |
+| `receiver` | bytes32 | Recipient on destination (bytes32 for non-EVM) |
+| `destinationToken` | bytes32 | Token to receive (bytes32 for non-EVM) |
+| `amount` | uint256 | Fixed amount (decimals based on intentType) |
+| `intentType` | IntentType | EXACT_IN or EXACT_OUT |
+| `refundAddress` | address | Where to send funds if expired |
+| `nonce` | uint256 | Unique per refundAddress |
 | `deadline` | uint256 | Unix timestamp when intent expires |
 
-### Amount Handling by IntentType
+### Amount Decimals by IntentType
 
 ```
-EXACT_IN (default):
 ┌─────────────────────────────────────────────────────────────┐
-│  sourceAmount = 100 USDC (user deposits this, FIXED)        │
-│  fee = 0.3 USDC                                             │
-│  destinationAmount = 99.7 USDC (receiver gets this)         │
+│  EXACT_IN: Amount in SOURCE chain decimals                  │
+├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  For Permit2/approve: use sourceAmount from intent          │
-│  For intent address: use all balance on contract            │
+│  Example: Send 100 USDC from Base to Stellar                │
+│                                                             │
+│  amount = 100_000_000  (100 USDC in 6 decimals - Base)      │
+│  intentType = EXACT_IN                                      │
+│                                                             │
+│  User deposits: 100 USDC on Base (6 decimals)               │
+│  Receiver gets: ~99.7 USDC on Stellar (7 decimals)          │
+│                 = 997_000_000 in Stellar decimals           │
+│                                                             │
 └─────────────────────────────────────────────────────────────┘
 
-EXACT_OUT:
 ┌─────────────────────────────────────────────────────────────┐
-│  destinationAmount = 100 USDC (receiver gets this, FIXED)   │
-│  fee = 0.3 USDC                                             │
-│  sourceAmount = 100.3 USDC (user must deposit this)         │
+│  EXACT_OUT: Amount in DESTINATION chain decimals            │
+├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  For Permit2/approve: use sourceAmount from intent          │
-│  For intent address: use all balance on contract            │
+│  Example: Receiver gets exactly 100 USDC on Stellar         │
+│                                                             │
+│  amount = 1_000_000_000  (100 USDC in 7 decimals - Stellar) │
+│  intentType = EXACT_OUT                                     │
+│                                                             │
+│  Receiver gets: exactly 100 USDC on Stellar (7 decimals)    │
+│  User deposits: ~100.3 USDC on Base (6 decimals)            │
+│                 = 100_300_000 in Base decimals              │
+│                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -94,18 +117,32 @@ enum IntentStatus {
 
 ### IntentStorage
 
-On-chain storage for each intent.
+On-chain storage for each intent. Populated during execution.
 
 ```solidity
 struct IntentStorage {
     IntentStatus status;             // Current state
-    address processor;               // Relayer who locked/fulfilled (address(0) if none)
-    address sourceToken;             // Token deposited
-    uint256 amountDeposited;         // Actual amount received on source chain
-    bytes32 fulfillmentTxHash;       // Destination tx hash (set after fulfillment)
-    uint256 deadline;                // Copied from intent for refund checks
+
+    // Intent metadata (copied from RozoIntent for refund)
+    address refundAddress;           // Where to refund if expired
+    uint256 deadline;                // When intent expires
+
+    // Source info (unknown until deposit)
+    address sender;                  // Who deposited
+    address sourceToken;             // What token was deposited
+    uint256 sourceAmount;            // How much was deposited (in source decimals)
+
+    // Execution info
+    address processor;               // Relayer who fulfilled (v2: who locked)
+    bytes32 fulfillmentTxHash;       // Destination tx hash (after validation)
 }
 ```
+
+**Why separate from RozoIntent?**
+- `sender` - Unknown until someone deposits (for CREATE2 flow)
+- `sourceToken` - User can deposit any token, relayer swaps if needed
+- `sourceAmount` - Actual deposited amount (may differ for EXACT_OUT)
+- `refundAddress`, `deadline` - Copied from RozoIntent so refund() works with just intentHash
 
 ## Validation Structs
 
@@ -117,7 +154,7 @@ Data that validators sign to confirm relayer paid on destination.
 struct FulfillmentProof {
     bytes32 intentHash;              // keccak256(abi.encode(intent))
     bytes32 destinationTxHash;       // Transaction hash on destination chain
-    uint256 amountPaid;              // Actual amount paid to receiver
+    uint256 amountPaid;              // Actual amount paid (in destination decimals)
     uint256 timestamp;               // When validator verified the payment
 }
 ```
@@ -159,7 +196,7 @@ address public primaryValidator;
 // Secondary validators (any one can co-sign with primary)
 mapping(address => bool) public secondaryValidators;
 
-// Protocol fee in basis points (e.g., 30 = 0.3%)
+// Protocol fee in basis points (e.g., 3 = 0.03%)
 uint256 public protocolFeeBps;
 
 // Accumulated fees per token
@@ -168,16 +205,15 @@ mapping(address => uint256) public accumulatedFees;
 
 ## Intent Hash Calculation
 
+Intent hash is computed from `RozoIntent` only (no sender/sourceToken):
+
 ```solidity
 function getIntentHash(RozoIntent calldata intent) public pure returns (bytes32) {
     return keccak256(abi.encode(
-        intent.sender,
-        intent.sourceToken,
-        intent.sourceAmount,
         intent.destinationChainId,
         intent.receiver,
         intent.destinationToken,
-        intent.destinationAmount,
+        intent.amount,
         intent.intentType,
         intent.refundAddress,
         intent.nonce,
@@ -187,6 +223,8 @@ function getIntentHash(RozoIntent calldata intent) public pure returns (bytes32)
 ```
 
 ## Intent Address Calculation (CREATE2)
+
+Address is deterministic based on intent parameters only:
 
 ```solidity
 function getIntentAddress(RozoIntent calldata intent) public view returns (address) {
@@ -203,10 +241,14 @@ function getIntentAddress(RozoIntent calldata intent) public view returns (addre
 }
 ```
 
+**Note:** `sender` and `sourceToken` are NOT part of the address calculation. This allows:
+- User to deposit any token
+- Address to be computed before anyone deposits
+
 ## Events
 
 ```solidity
-// Intent created (user deposited)
+// Intent created via createIntent() or startIntent()
 event IntentCreated(
     bytes32 indexed intentHash,
     address indexed sender,
@@ -226,7 +268,8 @@ event IntentProcessing(
 event IntentFulfilled(
     bytes32 indexed intentHash,
     address indexed processor,
-    bytes32 destinationTxHash
+    bytes32 destinationTxHash,
+    uint256 amountPaid
 );
 
 // Intent expired
@@ -238,6 +281,7 @@ event IntentExpired(
 event IntentRefunded(
     bytes32 indexed intentHash,
     address indexed refundAddress,
+    address token,
     uint256 amount
 );
 ```
@@ -258,4 +302,7 @@ error InvalidSecondarySignature();
 error InsufficientDeposit();
 error TransferFailed();
 error Unauthorized();
+error InvalidIntentType();
+error ZeroAmount();
+error ZeroAddress();
 ```

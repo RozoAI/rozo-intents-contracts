@@ -16,6 +16,9 @@ All bridging and swapping is handled **off-chain by relayers**. The contract doe
 See also:
 - [TERMINOLOGY.md](./TERMINOLOGY.md) - Standard terms and definitions
 - [DATA_STRUCTURES.md](./DATA_STRUCTURES.md) - Struct definitions and events
+- [EVM.md](./EVM.md) - EVM-specific implementation (CREATE2 intent addresses)
+- [FEE.md](./FEE.md) - Fee structure and calculations
+- [FUND_FLOW.md](./FUND_FLOW.md) - How funds move through the system
 
 ## Architecture
 
@@ -75,7 +78,7 @@ In Phase 1, only one whitelisted relayer operates. Relayer can directly fulfill 
 1. User deposits → Intent is NEW
 2. Relayer pays on destination, gets validator signatures
 3. Relayer calls `fulfillIntent()` → Intent is PROCESSED, funds transferred
-4. (Or) Deadline passes → User calls `refundIntent()`
+4. (Or) Deadline passes → User calls `refund()`
 
 ### Multiple Relayers Mode (Phase 2)
 
@@ -116,7 +119,7 @@ The contract includes all functions for both modes. The mode is **operational ch
 | `startIntent()` | Used | Used |
 | `processRequest()` | **Skip** (not needed) | **Use** (lock first) |
 | `fulfillIntent()` | Used (from NEW) | Used (from PROCESSING) |
-| `refundIntent()` | Used | Used |
+| `refund()` | Used | Used |
 
 ### Intent States
 
@@ -138,7 +141,7 @@ The contract includes all functions for both modes. The mode is **operational ch
 | NEW | EXPIRED | deadline passed | Anyone |
 | PROCESSING | PROCESSED | `fulfillIntent()` | Same Relayer |
 | PROCESSING | EXPIRED | deadline passed | Anyone |
-| EXPIRED | REFUNDED | `refundIntent()` | User |
+| EXPIRED | REFUNDED | `refund()` | User |
 
 ## Data Structures
 
@@ -221,21 +224,34 @@ For users interacting via Rozo API:
 │                                                             │
 │  2. User sends tokens to intent address (simple transfer)   │
 │     0x7a3b...f2c1 (unique per intent)                       │
+│     [Funds ISOLATED here until relayer claims]              │
 │                                                             │
-│  3. User payin triggers startIntent() on-chain              │
-│     - Deploys intent contract, pulls funds to main contract │
+│  3. Relayer detects deposit, pays receiver on destination   │
 │                                                             │
-│  4. Relayer detects intent, pays receiver on destination    │
-│                                                             │
-│  5. Relayer calls fulfillIntent() with validator signatures │
-│     - Validates signatures, transfers funds to relayer      │
+│  4. Relayer calls startIntent() + fulfillIntent() in one tx │
+│     - startIntent(): deploys intent contract, pulls funds   │
+│     - fulfillIntent(): validates sigs, transfers to relayer │
+│     Intent Address ──► Main Contract ──► Relayer (atomic)   │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Who does what:**
+- **User**: Just transfers tokens to intent address
+- **API**: Creates RozoIntent (generates nonce, computes address), returns intent address, monitors for deposits
+- **Relayer**: Receives intent params from API, calls startIntent() + fulfillIntent() after paying destination
+
+**How intent params are conveyed:**
+- API creates RozoIntent struct (destinationChainId, receiver, amount, nonce, deadline, etc.)
+- API stores intent params off-chain, computes CREATE2 address
+- When deposit detected, API notifies relayer with full RozoIntent data
+- Relayer passes RozoIntent to startIntent() on-chain
 
 **Use case**:
 - Regular users via Rozo API
 - Consumer products integrating Rozo
 - Simpler UX (just send to address)
+
+For detailed CREATE2 implementation, see [EVM.md](./EVM.md).
 
 ### Mode 2: Direct Contract Interaction (Contract Users)
 
@@ -246,14 +262,21 @@ For smart contracts or dApps interacting directly:
 │  1. User calls createIntent() directly on main contract     │
 │     - With approve + transfer, OR                           │
 │     - With Permit2 signature                                │
-│     - Funds go directly to main contract                    │
+│     - Intent is registered, funds go to main contract       │
 │                                                             │
-│  2. (v1) Relayer calls fulfillIntent() directly             │
-│     (v2) Relayer calls processRequest() to lock, then       │
-│          fulfillIntent() after paying destination           │
+│  2. Relayer detects intent, pays receiver on destination    │
+│                                                             │
+│  3. (v1) Relayer calls fulfillIntent() directly             │
+│     (v2) Relayer calls processRequest() to lock first,      │
+│          then fulfillIntent() after paying destination      │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Who does what:**
+- **User**: Calls createIntent() with approve/Permit2 (registers intent + deposits)
+- **Relayer**: Calls fulfillIntent() after paying destination
+- **No startIntent() needed**: createIntent() already registers the intent
 
 **Use case**:
 - Smart contract wallets (Safe, etc.)
@@ -276,35 +299,12 @@ For smart contracts or dApps interacting directly:
 // Main contract holds all funds after processing
 mapping(bytes32 => IntentStorage) public intents;
 
-// Factory for per-intent addresses
-RozoIntentFactory public intentFactory;
-
 // Two ways to create intent:
-// 1. createIntent() - direct deposit to main contract
-// 2. startIntent() - pull from intent address
+// 1. createIntent() - direct deposit to main contract (Contract Users)
+// 2. startIntent() - pull from CREATE2 intent address (API Users)
 ```
 
-### How Intent Address Works
-
-```solidity
-// RozoIntentContract.sol - minimal proxy deployed per intent
-contract RozoIntentContract {
-    address public immutable mainContract;
-    bytes32 public immutable intentHash;
-
-    // Only main contract can pull funds
-    function release(address token) external {
-        require(msg.sender == mainContract);
-        // Transfer all tokens to main contract
-    }
-
-    // User can reclaim if intent expires
-    function refund(address token, address to) external {
-        require(block.timestamp > deadline);
-        // Transfer to refund address
-    }
-}
-```
+For CREATE2 intent address implementation details, see [EVM.md](./EVM.md).
 
 ### Important: Not a Savings Account
 
@@ -325,7 +325,7 @@ contract RozoIntentContract {
 │                                                             │
 │  If no relayer fulfills:                                    │
 │  - Intent expires after deadline (default 24h)              │
-│  - Sender withdraws via refundIntent()                      │
+│  - Sender withdraws via refund()                      │
 │                                                             │
 │  DO NOT use intent addresses as wallets or vaults.          │
 │                                                             │
@@ -354,48 +354,50 @@ User → Main Contract → Relayer
 
 ```solidity
 /// @notice Get intent address for an intent (does not deploy)
-/// @dev User can send funds to this address before calling startIntent
+/// @dev Address is deterministic based on intent params only (no sender)
+/// @dev User can send ANY token to this address
 function getIntentAddress(
     RozoIntent calldata intent
 ) external view returns (address intentAddress);
 
 /// @notice Create intent with standard ERC20 approve (direct deposit)
-/// @dev For Permit2/approve: transfers sourceAmount from sender
+/// @dev Transfers sourceToken from sender to main contract
+/// @param intent The intent parameters
+/// @param sourceToken Token to deposit (what user is sending)
+/// @param sourceAmount Amount to deposit (in source token decimals)
 function createIntent(
+    RozoIntent calldata intent,
     address sourceToken,
-    uint256 sourceAmount,
-    uint256 destinationChainId,
-    bytes32 receiver,
-    bytes32 destinationToken,
-    uint256 destinationAmount,
-    IntentType intentType,       // EXACT_IN (default) or EXACT_OUT
-    uint256 deadline
+    uint256 sourceAmount
 ) external payable returns (bytes32 intentHash);
 
 /// @notice Create intent with Permit2 (gasless approval)
-/// @dev For Permit2: transfers sourceAmount from sender using signature
+/// @dev Transfers sourceToken from sender using Permit2 signature
 function createIntentWithPermit2(
+    RozoIntent calldata intent,
     address sourceToken,
     uint256 sourceAmount,
-    uint256 destinationChainId,
-    bytes32 receiver,
-    bytes32 destinationToken,
-    uint256 destinationAmount,
-    IntentType intentType,
-    uint256 deadline,
     bytes calldata permit2Signature
 ) external returns (bytes32 intentHash);
 
 /// @notice Start intent from pre-funded intent address
-/// @dev For intent address: uses ALL balance on the intent contract
-/// @dev Deploys intent contract if needed, pulls funds to main contract
+/// @dev For CREATE2 flow: relayer calls this after user deposited to intent address
+/// @dev Uses ALL token balance on the intent address
+/// @param intent The intent parameters
+/// @param sourceToken Token that was deposited to intent address
 function startIntent(
-    RozoIntent calldata intent
+    RozoIntent calldata intent,
+    address sourceToken
 ) external returns (bytes32 intentHash);
 
 /// @notice Refund expired intent to refundAddress
-function refundIntent(bytes32 intentHash) external;
+function refund(bytes32 intentHash) external;
 ```
+
+**Note:** `RozoIntent` does NOT include `sender`, `sourceToken`, or `sourceAmount`. These are:
+- `sender` - Set to msg.sender (createIntent) or derived from deposit (startIntent)
+- `sourceToken` - Passed as parameter (user can deposit any token)
+- `sourceAmount` - Passed as parameter or uses full balance (startIntent)
 
 ### Relayer Functions
 
@@ -448,17 +450,19 @@ function unpause() external onlyOwner;
 ## Fee Structure
 
 ```
-User deposits:     amountIn
-Protocol fee:      amountIn * feeBps / 10000
-Relayer receives:  amountIn - protocolFee
+User deposits:     sourceAmount
+Protocol fee:      sourceAmount * feeBps / 10000
+Relayer receives:  sourceAmount - protocolFee
 
-Example (feeBps = 30, i.e., 0.3%):
+Example (feeBps = 3, i.e., 0.03%):
 - User deposits: 1000 USDC
-- Protocol fee:  1000 * 30 / 10000 = 3 USDC
-- Relayer gets:  997 USDC
+- Protocol fee:  1000 * 3 / 10000 = 0.3 USDC
+- Relayer gets:  999.7 USDC
 ```
 
-The relayer's profit comes from the spread between what they receive (997 USDC) and what they pay on destination (`amountOut`).
+The relayer's profit comes from the spread between what they receive (999.7 USDC) and what they pay on destination.
+
+For detailed fee structure and examples, see [FEE.md](./FEE.md).
 
 ## Security Considerations
 
@@ -505,7 +509,7 @@ The dual-validator model provides defense in depth:
 **User fund safety:**
 - Funds in PROCESSING state: Safe (attacker needs secondary too)
 - Funds in NEW state: Safe (no fulfillment possible while paused)
-- Expired intents: User can always refund via `refundIntent()`
+- Expired intents: User can always refund via `refund()`
 
 ### Infrastructure Recommendations
 

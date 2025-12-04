@@ -21,8 +21,8 @@ This document defines the standard terminology used across RozoIntents contracts
 | Polygon | 137 |
 | Base | 8453 |
 | Arbitrum | 42161 |
-| Solana | 900 |
-| Stellar | 1500 |
+| Solana | 900 | *(non-EVM)* |
+| Stellar | 1500 | *(non-EVM)* |
 
 ## Token Terminology
 
@@ -30,7 +30,7 @@ This document defines the standard terminology used across RozoIntents contracts
 |------|-------------|---------|
 | **Source Token** | Token deposited by sender on source chain | USDC on Base |
 | **Destination Token** | Token received by receiver on destination chain | USDC on Stellar |
-| **Token Symbol** | Human-readable token identifier | `USDC`, `USDT`, `ETH` |
+| **Token Symbol** | Human-readable token identifier | `USDC`, `USDT` |
 | **Token Address** | Contract address of the token | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` |
 
 **Supported Tokens:**
@@ -59,26 +59,25 @@ This document defines the standard terminology used across RozoIntents contracts
 | Context | Format | Example |
 |---------|--------|---------|
 | Solidity Contract | UPPER_SNAKE_CASE enum | `IntentType.EXACT_IN` |
-| API Request | camelCase string | `"exactIn"` |
 
 ### exactIn Example
 ```
 User wants to send 100 USDC
-Fee: 0.3% = 0.3 USDC
+Fee: 0.03% = 0.03 USDC
 
 Source Amount:      100 USDC (fixed, user deposits this)
-Fee:                0.3 USDC
-Destination Amount: 99.7 USDC (receiver gets this)
+Fee:                0.03 USDC
+Destination Amount: 99.97 USDC (receiver gets this)
 ```
 
 ### exactOut Example
 ```
 User wants receiver to get exactly 100 USDC
-Fee: 0.3%
+Fee: 0.03%
 
 Destination Amount: 100 USDC (fixed, receiver gets this)
-Fee:                0.3 USDC
-Source Amount:      100.3 USDC (user must deposit this)
+Fee:                0.03 USDC
+Source Amount:      100.03 USDC (user must deposit this)
 ```
 
 ## Address Terminology
@@ -114,16 +113,33 @@ Source Amount:      100.3 USDC (user must deposit this)
 
 ## Contract vs API Field Mapping
 
+### RozoIntent Struct (Intent Definition)
+
 | Contract Field | API Field | Notes |
 |----------------|-----------|-------|
-| `sender` | `source.senderAddress` | Set after deposit |
-| `sourceToken` | `source.tokenAddress` | address(0) for native |
-| `sourceAmount` | `source.amount` | In token decimals |
 | `destinationChainId` | `destination.chainId` | Numeric chain ID |
-| `receiver` | `destination.receiverAddress` | bytes32 for cross-chain |
-| `destinationToken` | `destination.tokenAddress` | On destination chain |
-| `destinationAmount` | `destination.amount` | In token decimals |
+| `receiver` | `destination.receiverAddress` | bytes32 for cross-chain compatibility |
+| `destinationToken` | `destination.tokenAddress` | bytes32 for non-EVM chains |
+| `amount` | `source.amount` or `destination.amount` | Depends on intentType (see below) |
+| `intentType` | `type` | EXACT_IN or EXACT_OUT |
 | `refundAddress` | (optional, defaults to sender) | User can specify custom refund address |
-| `intentType` | `type` | EXACT_IN or EXACT_OUT (contract uses uppercase enum) |
 | `nonce` | `orderId` | Unique identifier |
 | `deadline` | (calculated) | Default 24h from creation |
+
+**Amount field by intentType:**
+- `EXACT_IN`: `amount` = `source.amount` (in source token decimals)
+- `EXACT_OUT`: `amount` = `destination.amount` (in destination token decimals)
+
+### IntentStorage (On-chain, After Deposit)
+
+These fields are NOT in RozoIntent - they are stored separately after deposit:
+
+| Storage Field | Source | Notes |
+|---------------|--------|-------|
+| `sender` | msg.sender or derived | Who deposited (unknown until deposit) |
+| `sourceToken` | Function parameter | What token was deposited (user can send any token) |
+| `sourceAmount` | Actual balance | How much was deposited |
+| `refundAddress` | Copied from RozoIntent | For refund lookup |
+| `deadline` | Copied from RozoIntent | For expiry check |
+| `processor` | Relayer address | Who fulfilled (v2: who locked) |
+| `fulfillmentTxHash` | Validator signed | Destination transaction hash |

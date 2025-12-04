@@ -17,7 +17,7 @@ Funds are **transient**, not stored. They should move within seconds:
 
 ## Flow 1: API User (Recommended)
 
-User interacts via Rozo API. Funds are isolated per intent.
+User interacts via Rozo API. Funds are isolated in intent address until relayer claims (atomic pull + fulfill).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -32,30 +32,27 @@ User interacts via Rozo API. Funds are isolated per intent.
 │                                                                             │
 │  3. User transfers tokens to intent address                                 │
 │     User Wallet ──────► Intent Address (0x7a3b...f2c1)                      │
-│                         [Funds ISOLATED here]                               │
+│                         [Funds ISOLATED here until relayer claims]          │
 │                                                                             │
-│  4. User payin triggers startIntent() on-chain                              │
-│     - Deploys intent contract (if not exists)                               │
-│     - Registers the intent, pulls funds to main contract                    │
-│                                                                             │
-│  5. Relayer detects intent, pays receiver on destination                    │
+│  4. Relayer detects deposit, pays receiver on destination                   │
 │     Relayer ──────────► Receiver (Stellar)                                  │
 │                                                                             │
-│  6. Validators verify destination payment, sign proof                       │
+│  5. Validators verify destination payment, sign proof                       │
 │                                                                             │
-│  7. Relayer calls fulfillIntent() with signatures                           │
-│     - Validates signatures, transfers funds to relayer                      │
-│     Main Contract ──► Relayer                                               │
+│  6. Relayer calls startIntent() + fulfillIntent() in one tx                 │
+│     - startIntent(): deploys intent contract, pulls funds                   │
+│     - fulfillIntent(): validates signatures, transfers to relayer           │
+│     Intent Address ──► Main Contract ──► Relayer (atomic)                   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Characteristics:**
-- Each intent has isolated funds (own address)
+- Funds isolated in intent address until relayer claims
+- Relayer calls startIntent() + fulfillIntent() atomically
 - Single relayer (Rozo) - no competition
 - Simple UX: just transfer to address
 - CREATE2 address is deterministic (can be pre-computed)
-- User payin triggers startIntent() on-chain
 
 ## Flow 2: Contract User (Direct Interaction)
 
@@ -102,13 +99,14 @@ User interacts directly with contract (e.g., dApp integration). Multiple relayer
 │                         FUND LOCATIONS                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  API User (Transfer):                                                       │
+│  API User (Transfer to CREATE2):                                            │
 │  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                │
 │  │ User Wallet  │ ──► │Intent Address│ ──► │Main Contract │ ──► Relayer    │
 │  └──────────────┘     └──────────────┘     └──────────────┘                │
-│                        (isolated)           (temporary)                     │
+│                       (isolated until       (atomic with                    │
+│                        relayer claims)       fulfillment)                   │
 │                                                                             │
-│  Contract User (Permit2/Approve):                                           │
+│  Contract User (Permit2/Approve via createIntent):                          │
 │  ┌──────────────┐     ┌──────────────┐                                     │
 │  │ User Wallet  │ ──► │Main Contract │ ──────────────────────► Relayer     │
 │  └──────────────┘     └──────────────┘                                     │
@@ -116,6 +114,10 @@ User interacts directly with contract (e.g., dApp integration). Multiple relayer
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Difference:**
+- **API User**: Funds isolated in intent address until relayer atomically pulls + claims
+- **Contract User**: Funds in main contract immediately, tracked by intentHash
 
 ## Pooled Funds
 
