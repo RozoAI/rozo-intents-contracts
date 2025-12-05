@@ -194,7 +194,8 @@ contract RozoIntentsTest is Test {
         assertEq(uint256(stored.status), uint256(IntentStatus.FILLED));
         assertEq(token.balanceOf(address(intents)), _fee());
         assertEq(token.balanceOf(address(bridge)), SOURCE_AMOUNT - _fee());
-        assertEq(bridge.lastCall.amount, SOURCE_AMOUNT - _fee());
+        MockBridgeAdapter.BridgeCall memory callData = bridge.lastCallData();
+        assertEq(callData.amount, SOURCE_AMOUNT - _fee());
     }
 
     function testSlowFillRevertsWhenUnsupported() public {
@@ -208,8 +209,12 @@ contract RozoIntentsTest is Test {
         bytes32 intentId = _createIntentWithDestination(SOURCE_AMOUNT);
         intents.setSlowFillBridge(DEST_CHAIN_ID, address(token), DEST_TOKEN, address(bridge));
 
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                bytes4(keccak256("InsufficientAmount(uint256,uint256)")), SOURCE_AMOUNT - _fee(), SOURCE_AMOUNT
+            )
+        );
         vm.prank(RELAYER);
-        vm.expectRevert(IRozoIntentsErrors.InsufficientAmount.selector);
         intents.slowFill(intentId);
     }
 
@@ -217,11 +222,11 @@ contract RozoIntentsTest is Test {
         bytes32 intentId = _createIntent();
         vm.warp(block.timestamp + 3 hours);
 
-        uint256 beforeBalance = token.balanceOf(SENDER);
+        uint256 beforeBalance = token.balanceOf(REFUND);
         vm.prank(SENDER);
         intents.refund(intentId);
 
-        assertEq(token.balanceOf(SENDER), beforeBalance + SOURCE_AMOUNT);
+        assertEq(token.balanceOf(REFUND), beforeBalance + SOURCE_AMOUNT);
         assertEq(uint256(intents.intents(intentId).status), uint256(IntentStatus.REFUNDED));
     }
 
@@ -295,8 +300,9 @@ contract RozoIntentsTest is Test {
         vm.stopPrank();
 
         assertEq(token.balanceOf(RECEIVER), DESTINATION_AMOUNT);
-        assertEq(keccak256(bytes(gateway.lastCall.destinationChain)), keccak256(bytes(CALLBACK_CHAIN_NAME)));
-        assertEq(keccak256(bytes(gateway.lastCall.destinationAddress)), keccak256(bytes(DEST_CONTRACT)));
+        MockAxelarGateway.CallData memory callData = gateway.lastCallData();
+        assertEq(keccak256(bytes(callData.destinationChain)), keccak256(bytes(CALLBACK_CHAIN_NAME)));
+        assertEq(keccak256(bytes(callData.destinationAddress)), keccak256(bytes(DEST_CONTRACT)));
     }
 
     function testFillAndNotifyRevertsWithoutChainMapping() public {

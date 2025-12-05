@@ -39,4 +39,8 @@ contract MockBridgeAdapter is IBridgeAdapter {
         lastCall = BridgeCall(destinationChainId, receiver, sourceToken, destinationToken, amount, refundAddress);
         return nextMessageId;
     }
+
+    function lastCallData() external view returns (BridgeCall memory) {
+        return lastCall;
+    }
 }

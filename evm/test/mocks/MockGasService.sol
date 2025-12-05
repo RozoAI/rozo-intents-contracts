@@ -22,4 +22,16 @@ contract MockGasService is IAxelarGasService {
     ) external payable override {
         emit GasPaid(sourceAddress, destinationChain, destinationAddress, payload, refundAddress, msg.value);
     }
+
+    function payNativeGasForContractCallWithToken(
+        address sourceAddress,
+        string calldata destinationChain,
+        string calldata destinationAddress,
+        bytes calldata payload,
+        string calldata,
+        uint256,
+        address refundAddress
+    ) external payable override {
+        emit GasPaid(sourceAddress, destinationChain, destinationAddress, payload, refundAddress, msg.value);
+    }
 }

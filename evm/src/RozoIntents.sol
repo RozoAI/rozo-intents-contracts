@@ -85,14 +85,14 @@ contract RozoIntents is
         Intent storage existing = _intents[intentId];
         if (existing.sender != address(0)) revert IntentAlreadyExists();
 
-        address refund = refundAddress == address(0) ? msg.sender : refundAddress;
+        address refundTarget = refundAddress == address(0) ? msg.sender : refundAddress;
 
         IERC20(sourceToken).safeTransferFrom(msg.sender, address(this), sourceAmount);
 
         _intents[intentId] = Intent({
             intentId: intentId,
             sender: msg.sender,
-            refundAddress: refund,
+            refundAddress: refundTarget,
             sourceToken: sourceToken,
             sourceAmount: sourceAmount,
             destinationChainId: destinationChainId,

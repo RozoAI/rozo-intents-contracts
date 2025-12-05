@@ -12,6 +12,7 @@ contract MockAxelarGateway is IAxelarGateway {
 
     CallData public lastCall;
     mapping(bytes32 => bool) public approvals;
+    mapping(string => address) public tokenAddress;
 
     function callContract(string calldata destinationChain, string calldata destinationAddress, bytes calldata payload)
         external
@@ -30,6 +31,10 @@ contract MockAxelarGateway is IAxelarGateway {
         return approvals[key];
     }
 
+    function tokenAddresses(string memory symbol) external view override returns (address) {
+        return tokenAddress[symbol];
+    }
+
     function approve(
         bytes32 commandId,
         string calldata sourceChain,
@@ -38,5 +43,13 @@ contract MockAxelarGateway is IAxelarGateway {
     ) external {
         bytes32 key = keccak256(abi.encode(commandId, sourceChain, sourceAddress, keccak256(payload)));
         approvals[key] = true;
+    }
+
+    function setTokenAddress(string calldata symbol, address addr) external {
+        tokenAddress[symbol] = addr;
+    }
+
+    function lastCallData() external view returns (CallData memory) {
+        return lastCall;
     }
 }

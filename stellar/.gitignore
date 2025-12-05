@@ -1,0 +1,5 @@
+# Build artifacts
+target/
+
+# Cargo.lock is typically committed for applications, but can be excluded for libraries
+# Cargo.lock
