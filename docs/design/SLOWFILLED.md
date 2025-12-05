@@ -1,23 +1,30 @@
-# SLOWFILLED
+# SlowFill
 
 SlowFill is Rozo's on-chain fallback path for intents that cannot be matched immediately by a fast relayer. Instead of waiting for an off-chain filler, the contract itself pushes the user funds through a canonical bridge (initially CCTP on Base) and finalizes the intent as soon as the transfer is queued. This document explains how that path works and what each component is expected to implement.
 
-```mermaid
-flowchart LR
-    subgraph Base
-        A[Sender createIntent] -->|deposit| B(RozoIntentsBase)
-        B -- slowFill() --> C[Deduct Fee]
-        C --> D[CCTP Burn]
-        D --> E[Status = FILLED]
-    end
-
-    D -->|bridge ~1-60 min| F[CCTP Mint]
-
-    subgraph Destination
-        F -->|direct| G[Receiver]
-    end
-
-    B -. "refund() only if CCTP burn reverts (stays NEW)" .-> H((Sender))
+```
+Base (Source)                                    Destination
+     │                                                │
+1. Sender: createIntent()                             │
+   └── deposit sourceAmount                           │
+   └── status = NEW                                   │
+     │                                                │
+2. Relayer/Bot: slowFill()                            │
+   └── deduct protocolFee                             │
+   └── bridgeAmount = destinationAmount               │
+   └── call CCTP burn ────────────────────────────────┼──► CCTP
+   └── status = FILLED                                │       │
+     │                                                │       │
+     │                                          ~1-60 min     │
+     │                                                │       │
+     │                                                │  CCTP mint
+     │                                                │       │
+     │                                                ▼       │
+     │                                           Receiver ◄───┘
+     │
+     │  [If CCTP burn reverts, status stays NEW]
+     │
+     └── refund() available after deadline
 ```
 
 **Key points:**
@@ -137,7 +144,7 @@ interface IBridge {
     /// @param receiver Recipient on destination (bytes32 for cross-chain)
     /// @param sourceToken Token to bridge from (may be swapped)
     /// @param destinationToken Token receiver expects
-    /// @param amount Amount to bridge (in destination token decimals)
+    /// @param amount Amount to bridge (in SOURCE TOKEN decimals)
     /// @param refundAddress Where to refund if bridge fails
     /// @return bridgeMessageId Unique ID for tracking the bridge tx
     function bridge(
@@ -151,6 +158,28 @@ interface IBridge {
 }
 ```
 
+### Amount Units: Source Chain Decimals
+
+> **Important:** The `amount` parameter is in **source token decimals**, NOT destination token decimals.
+
+| Parameter | Unit | Example (100 USDC on Base) |
+|-----------|------|----------------------------|
+| `amount` | Source chain decimals | `100_000000` (6 decimals) |
+
+**Why source decimals?**
+- RozoIntents holds `sourceAmount` in source token decimals
+- CCTP's `depositForBurn()` expects source token decimals
+- Bridge mints equivalent value on destination (CCTP handles conversion internally)
+
+### Decimal Conversion Responsibility
+
+| Component | Responsibility |
+|-----------|----------------|
+| **Frontend** | Calculates `destinationAmount` in destination decimals |
+| **RozoIntents contract** | Stores both amounts, passes `destinationAmount` to adapter |
+| **Bridge Adapter** | Converts if needed before calling underlying bridge |
+| **CCTP** | Burns source amount, mints equivalent on destination |
+
 ### CCTPAdapter Example
 
 ```solidity
@@ -162,16 +191,20 @@ contract CCTPAdapter is IBridge {
         bytes32 receiver,
         address sourceToken,
         bytes32 destinationToken,
-        uint256 amount,
+        uint256 amount,              // In SOURCE token decimals
         address refundAddress
     ) external returns (bytes32 bridgeMessageId) {
         // 1. If sourceToken != USDC, swap to USDC first
+        //    (swap output will be in source chain USDC decimals)
+
         // 2. Call CCTP burn
+        //    CCTP expects amount in SOURCE chain decimals
+        //    CCTP handles the decimal conversion internally when minting
         uint64 nonce = tokenMessenger.depositForBurn(
-            amount,
+            amount,                      // Source chain decimals (e.g., 6 for Base USDC)
             destinationDomain,           // CCTP domain ID
             bytes32(receiver),           // recipient
-            address(sourceToken)         // USDC
+            address(sourceToken)         // USDC address on source chain
         );
 
         return bytes32(uint256(nonce));
@@ -179,14 +212,34 @@ contract CCTPAdapter is IBridge {
 }
 ```
 
+### Decimal Conversion Example
+
+```
+Scenario: SlowFill 100 USDC from Base to Arbitrum
+
+Both chains use 6 decimals for USDC, so no conversion needed:
+- amount passed to adapter: 100_000000 (6 decimals)
+- CCTP burns: 100_000000 on Base
+- CCTP mints: 100_000000 on Arbitrum
+
+Hypothetical: If destination had different decimals (e.g., 18):
+- Frontend calculates destinationAmount in 18 decimals for user expectation
+- Adapter still receives amount in source decimals (6)
+- CCTP or adapter handles conversion during mint
+```
+
 ### Adapter Responsibilities
 
 | Task | Handled By |
 |------|------------|
-| Swap source token → bridge token | Adapter |
+| Receive amount in source decimals | Adapter input |
+| Swap source token → bridge token (if needed) | Adapter |
+| Convert decimals (if bridge requires) | Adapter |
 | Call bridge (CCTP burn) | Adapter |
 | Return tracking ID | Adapter |
 | Handle bridge-specific encoding | Adapter |
+
+> **Note for Adapter Developers:** If your bridge requires destination decimals, convert within the adapter before calling the underlying bridge. Document this clearly in your adapter implementation.
 
 - **CCTP Bridge**
   - Burns tokens on source chain.
@@ -197,44 +250,55 @@ contract CCTPAdapter is IBridge {
 
 ## Fees & Accounting
 
-### Amount Calculation
+### SlowFill Fee Formula
 
-Frontend calculates and user approves:
+SlowFill has a simple fee model with only three variables:
+
 ```
-destinationAmount = sourceAmount - protocolFee - slippage
+┌─────────────────────────────────────────────────────────────┐
+│  sourceAmount = destinationAmount + protocolFee             │
+│                                                             │
+│  Where:                                                     │
+│  - sourceAmount:      What sender deposits                  │
+│  - destinationAmount: What receiver gets (bridged via CCTP) │
+│  - protocolFee:       sourceAmount - destinationAmount      │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-| Field | Description |
-|-------|-------------|
-| `sourceAmount` | What sender deposits (in source chain decimals) |
-| `protocolFee` | Standard protocol fee (e.g., 3 bps) |
-| `destinationAmount` | Minimum receiver expects (set by frontend/user) |
+**Key difference from Fast Fill:**
+- **Fast Fill:** Relayer earns spread (`sourceAmount - protocolFee - destinationAmount`)
+- **Slow Fill:** No relayer, all difference goes to protocol
 
 ### How It Works
 
-1. **Frontend** calculates `destinationAmount` using the formula above
+1. **Frontend** calculates `destinationAmount` based on fees
 2. **User** approves and calls `createIntent()` with both amounts
-3. **Relayer/bot** checks: is `sourceAmount - protocolFee >= destinationAmount`?
-   - If yes → triggers `slowFill()`
-   - If no → ignores intent
-4. **Contract** validates: `bridgeAmount >= destinationAmount` or reverts
-
-**Key:** Frontend sets `destinationAmount`. Contract only validates. Rozo ops bot pays gas for `slowFill()` as a service.
-
-### Fee Distribution
-
-- Protocol fee accumulates in RozoIntents on source chain.
-- `feeRecipient` can withdraw via `withdrawFees(token)`.
-- **No relayer spread** - SlowFill is a service, not arbitrage.
+3. **Relayer/bot** triggers `slowFill()`
+4. **Contract** does:
+   - Bridge exactly `destinationAmount` to receiver via CCTP
+   - Keep `sourceAmount - destinationAmount` as protocol fee
+   - Set status to FILLED
 
 ### Example
 
 ```
-- sourceAmount: 1000 USDC (6 decimals on Base)
-- protocolFee: 3 USDC
-- destinationAmount: 997 USDC
-- CCTP burns: 997 USDC → mints to receiver
+sourceAmount      = 1000 USDC (deposited by sender)
+destinationAmount = 997 USDC  (receiver gets this)
+protocolFee       = 3 USDC    (1000 - 997, kept by protocol)
+
+CCTP burns: 997 USDC → mints to receiver on destination chain
 ```
+
+### Fee Distribution
+
+| Amount | Destination |
+|--------|-------------|
+| `destinationAmount` | Bridged to receiver via CCTP |
+| `sourceAmount - destinationAmount` | Protocol fee pool |
+
+- Protocol fee accumulates in RozoIntents on source chain
+- `feeRecipient` can withdraw via `withdrawFees(token)`
+- **No relayer spread** - SlowFill is a service, not arbitrage
 
 ### Decimals
 

@@ -81,7 +81,7 @@ Sender specifies both amounts when creating intent:
 | `sourceAmount` | Amount deposited (locked in contract) |
 | `destinationAmount` | Minimum receiver expects |
 
-**Fee/slippage calculated by frontend upfront.** Contract simply:
+**Fees calculated by frontend upfront.** Contract simply:
 1. Locks `sourceAmount`
 2. Verifies `amountPaid >= destinationAmount`
 3. Releases `sourceAmount - protocolFee` to relayer
@@ -113,20 +113,35 @@ Protocol fee can be taken from the spread. Configured via admin:
 
 ## Fee Formula
 
-### Complete Formula
+### Fast Fill Formula
 
 ```
-destinationAmount = sourceAmount - protocolFee - relayerSpread - slippage
-
-Where:
-- sourceAmount:      What sender deposits (source chain decimals)
-- protocolFee:       sourceAmount × protocolFeeBps / 10000
-- relayerSpread:     Relayer's profit margin (set by frontend/relayer quote)
-- slippage:          Buffer for price fluctuation (optional)
-- destinationAmount: Minimum receiver expects (destination chain decimals)
+┌─────────────────────────────────────────────────────────────────┐
+│  sourceAmount = destinationAmount + protocolFee + relayerSpread │
+│                                                                 │
+│  Where:                                                         │
+│  - sourceAmount:      What sender deposits                      │
+│  - destinationAmount: What receiver gets                        │
+│  - protocolFee:       sourceAmount × protocolFeeBps / 10000     │
+│  - relayerSpread:     Relayer's profit (difference)             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Relayer Payout Formula
+### Slow Fill Formula
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  sourceAmount = destinationAmount + protocolFee                 │
+│                                                                 │
+│  Where:                                                         │
+│  - sourceAmount:      What sender deposits                      │
+│  - destinationAmount: What receiver gets (bridged via CCTP)     │
+│  - protocolFee:       sourceAmount - destinationAmount          │
+│  - No relayer spread (SlowFill is a service, not arbitrage)     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Relayer Payout Formula (Fast Fill)
 
 ```
 relayerPayout = sourceAmount - protocolFee
@@ -142,28 +157,36 @@ Relayer pays `destinationAmount` on destination, receives `sourceAmount - protoc
 
 ```
 Chain Decimals:
-- Base USDC:    6 decimals
-- Stellar USDC: 7 decimals
+- Base USDC:    6 decimals (1 USDC = 1_000000)
+- Stellar USDC: 7 decimals (1 USDC = 10_000000)
 
 User wants to send 100 USDC from Base to Stellar:
 
 1. Frontend calculates:
-   - sourceAmount:     100_000000      (100 USDC, 6 decimals)
-   - protocolFee:      30000           (0.03 USDC, 3 bps)
-   - relayerSpread:    470000          (0.47 USDC)
-   - destinationAmount: 995_000000     (99.5 USDC, 7 decimals)
+   - sourceAmount:      100_000000      (100 USDC, 6 decimals on Base)
+   - protocolFee:           30000       (0.03 USDC, 3 bps of 100)
+   - relayerSpread:        470000       (0.47 USDC)
+   - destinationAmount: 995_0000000     (99.5 USDC, 7 decimals on Stellar)
+                        ^^^^^^^^^^^
+                        Note: 7 zeros for Stellar!
 
 2. User approves & calls createIntent():
-   - Deposits: 100_000000 (Base USDC)
-   - Expects:  995_000000 (Stellar USDC)
+   - Deposits: 100_000000   (Base USDC, 6 decimals)
+   - Expects:  995_0000000  (Stellar USDC, 7 decimals)
 
 3. Relayer fills:
-   - Pays receiver: 995_000000 (Stellar USDC, 7 decimals)
-   - Receives:      99_970000  (Base USDC, 6 decimals = 100 - 0.03 fee)
-   - Profit:        0.47 USDC (spread) minus gas costs
+   - Pays receiver: 995_0000000 (Stellar USDC, 7 decimals = 99.5 USDC)
+   - Receives:       99_970000  (Base USDC, 6 decimals = 99.97 USDC)
+   - Profit:         0.47 USDC (spread) minus gas costs
 ```
 
-### Example 2: Stellar → BNB Chain (USDC)
+> **Decimal Conversion:** When converting amounts between chains:
+> - Base → Stellar: multiply by 10 (add one zero)
+> - Stellar → Base: divide by 10 (remove one zero)
+
+### Example 2: Stellar → BNB Chain (USDC) - Future Support
+
+> **Note:** BNB Chain support is planned for future release. This example demonstrates decimal handling across chains with different token decimals.
 
 ```
 Chain Decimals:
@@ -224,11 +247,13 @@ Different chains use different decimals for the same token:
 Example: Send 100 USDC from Base to Stellar
 
 Frontend sets:
-- sourceAmount: 100_000000 (6 decimals, Base)
-- destinationAmount: 99_7000000 (7 decimals, Stellar)
+- sourceAmount:      100_000000  (6 decimals, Base = 100 USDC)
+- destinationAmount: 997_000000  (7 decimals, Stellar = 99.7 USDC)
+                     ^^^^^^^^^^
+                     7 digits after underscore
 
 Relayer:
-- Pays receiver: 99_7000000 (7 decimals on Stellar)
+- Pays receiver: 997_0000000 (7 decimals on Stellar = 99.7 USDC)
 - Receives: 100_000000 - protocolFee (6 decimals on Base)
 - Profit: spread minus gas costs
 ```
@@ -237,23 +262,32 @@ Contract does NOT convert decimals. Frontend calculates both amounts. Relayer ha
 
 ## Supported Tokens
 
-**ERC-20 tokens only.** Native ETH not supported.
+**Currently: Stablecoins only (USDC).** Native assets NOT supported.
 
-- Contract uses `transferFrom()` to pull tokens from sender
+| Chain | Supported | NOT Supported |
+|-------|-----------|---------------|
+| EVM (Base) | ERC-20 tokens | Native ETH |
+| Stellar | Soroban tokens (SEP-41) | Native XLM |
+
+**Why no native assets?**
+- Contract uses `transferFrom()` to pull tokens
+- Native assets require `msg.value` / different transfer mechanism
 - Sender must `approve()` RozoIntents before calling `createIntent()`
-- Stellar uses equivalent token transfer mechanism
+
+See [GLOSSARY.md](./GLOSSARY.md) for full token support matrix.
 
 ## Refund
 
-If intent expires (deadline passed), sender can call `refund()`:
+If intent expires (deadline passed), refund can be triggered:
 
 ```
 NEW or FILLING ──► (deadline passes) ──► refund() ──► REFUNDED
 ```
 
-- **No fee on refund** - sender gets full `sourceAmount` back
+- **No fee on refund** - full `sourceAmount` returned
 - **No partial refund** - all or nothing
-- **Only sender can trigger** - funds go to `refundAddress`
+- **Who can call:** `sender` or `refundAddress` can trigger refund
+- **Funds go to:** `refundAddress` (defaults to sender if not specified)
 - **No EXPIRED status** - `refund()` sets status directly to REFUNDED
 
 ## Security

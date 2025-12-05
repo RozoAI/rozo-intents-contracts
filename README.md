@@ -4,7 +4,9 @@ Intent-based cross-chain payments. Base ↔ Stellar (bidirectional).
 
 No custom validators. Axelar handles verification.
 
-Any token supported. Frontend calculates fees upfront.
+Architecture supports ERC-20/Soroban tokens. **Currently: USDC only.** Frontend calculates fees upfront.
+
+> **New to RozoIntents?** Start with [GLOSSARY.md](./docs/design/GLOSSARY.md) to understand key terms.
 
 ## Flow
 
@@ -18,45 +20,44 @@ Messenger ──► notify() ────────┴──► FILLED (relaye
 
 ## Documentation
 
-### [DESIGN.md](./docs/DESIGN.md)
-Architecture, functions, status.
-- **Status:** NEW → FILLING → FILLED (or REFUNDED after deadline)
-- **Functions:** createIntent, fill, slowFill, notify, refund
-- **Admin:** setFeeRecipient, setProtocolFee, addRelayer, removeRelayer
+### Design
 
-### [TERMINOLOGY.md](./docs/TERMINOLOGY.md)
-Terms, chains, tokens.
-- **Chains:** Base ↔ Stellar (bidirectional)
-- **Tokens:** Any (USDC, USDT common)
-- **Roles:** Sender, Receiver, Relayer, Messenger
+System architecture and protocol specifications.
 
-### [FUND_FLOW.md](./docs/FUND_FLOW.md)
-Fund movement & fees.
-- **Amount model:** Sender specifies sourceAmount + destinationAmount
-- **Fees:** Calculated by frontend upfront (in the spread)
-- **Refund:** 100% back after deadline expires
+| Document | Description |
+|----------|-------------|
+| [DESIGN.md](./docs/design/DESIGN.md) | Architecture, functions, status flow |
+| [GLOSSARY.md](./docs/design/GLOSSARY.md) | Terms, chains, tokens, roles |
+| [FUND_FLOW.md](./docs/design/FUND_FLOW.md) | Fund movement, fees, refunds |
+| [DATA_STRUCTURES.md](./docs/design/DATA_STRUCTURES.md) | Intent struct, events, errors |
+| [MESSENGER_DESIGN.md](./docs/design/MESSENGER_DESIGN.md) | Axelar integration |
+| [SLOWFILLED.md](./docs/design/SLOWFILLED.md) | CCTP bridge fallback |
+| [STELLAR.md](./docs/design/STELLAR.md) | Stellar address/token encoding, Soroban integration |
 
-### [RELAYER.md](./docs/RELAYER.md)
-Relayer guide.
-- **Phase 1:** Admin whitelist only
-- **Race:** First-come-first-serve
-- **Safety:** No fill = sender refunds, no fund loss
+### Development
 
-### [MESSENGER_DESIGN.md](./docs/MESSENGER_DESIGN.md)
-Messenger integration & Axelar flow.
-- **Function:** Axelar calls notify() on RozoIntents
-- **Multi-chain:** mapping(chain → trustedContract)
-- **Live:** Axelar (~5-10 sec)
+Implementation guides for developers.
 
-### [SLOWFILLED.md](./docs/SLOWFILLED.md)
-SlowFill bridge fallback details.
-- **Bridge:** CCTP (EVM ↔ EVM only for now)
-- **Status:** NEW → FILLED directly
-- **Delivery:** CCTP mints directly to receiver (bypasses destination contract)
-- **⚠️ No refund:** Once SlowFill succeeds, no refund via RozoIntents. If CCTP stalls, use `refundAddress` to claim from CCTP directly.
+| Document | Description |
+|----------|-------------|
+| [DEPLOYMENT.md](./docs/development/DEPLOYMENT.md) | Contract deployment & configuration |
+| [TESTING.md](./docs/development/TESTING.md) | Test strategy & test cases |
+| [RELAYER.md](./docs/development/RELAYER.md) | Relayer implementation guide |
 
-### [DATA_STRUCTURES.md](./docs/DATA_STRUCTURES.md)
-Intent struct, parameters, events, errors.
-- **Intent struct:** All fields with types
-- **createIntent params:** Full parameter table
-- **Events & errors:** Complete list
+## Quick Reference
+
+### Status Flow
+```
+NEW → FILLING → FILLED
+ │       │
+ │       └──► FAILED (verification mismatch, admin recovery)
+ │
+ └──► REFUNDED (after deadline)
+```
+
+### Key Points
+
+- **Fast Fill:** Relayer pays receiver, gets repaid via Axelar (~5-10 sec)
+- **Slow Fill:** CCTP bridges directly to receiver (~1-60 min, EVM only)
+- **Safety:** No fill = sender refunds after deadline, no fund loss
+- **Admin:** Fee management, relayer whitelist, intent recovery

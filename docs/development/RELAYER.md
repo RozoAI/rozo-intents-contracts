@@ -99,15 +99,55 @@ Example: Base → Arbitrum
 
 **Worst case = wait for timeout.** No fund loss possible.
 
+## Intent Discovery
+
+Relayers discover new intents through:
+
+### Option 1: Rozo API (Recommended)
+
+Rozo provides an API for relayers to discover fillable intents:
+
+```
+GET /api/v1/intents?status=NEW&destinationChain=stellar
+```
+
+Returns list of intents with all details needed to fill.
+
+### Option 2: On-Chain Events
+
+Listen to `IntentCreated` events directly:
+
+```solidity
+event IntentCreated(
+    bytes32 indexed intentId,
+    address indexed sender,
+    address sourceToken,
+    uint256 sourceAmount,
+    uint256 destinationChainId,
+    bytes32 receiver,
+    uint256 destinationAmount,
+    uint64 deadline
+);
+```
+
+### Events to Monitor
+
+| Event | When | Action |
+|-------|------|--------|
+| `IntentCreated` | New intent available | Evaluate profitability, decide to fill |
+| `IntentFilling` | Another relayer claimed | Stop trying to fill this intent |
+| `IntentFilled` | Intent completed | Update local state |
+| `IntentRefunded` | Intent refunded | Remove from active list |
+
 ## Off-Chain Data
 
 | Data | Where |
 |------|-------|
-| Intent creation | On-chain event |
-| Relayer monitoring | Off-chain indexer |
+| Intent creation | On-chain event / Rozo API |
+| Relayer monitoring | Off-chain indexer / Rozo API |
 | Stellar payment | Stellar ledger |
 | Fill confirmation | Axelar message (verified by 75+ validators) |
-| Settlement | On-chain fillNotify() |
+| Settlement | On-chain notify() |
 
 ## Future: Open Relayer Network (Phase 2)
 
@@ -131,3 +171,16 @@ function removeRelayer(address relayer) external onlyOwner;
 | Relayer doesn't complete | Sender refunds after deadline |
 | Relayer fills wrong amount | Axelar verifies actual payment |
 | Fake fillNotify | Only Messenger can call |
+
+---
+
+## See Also
+
+### Design
+- [DESIGN.md](../design/DESIGN.md) - Architecture overview
+- [FUND_FLOW.md](../design/FUND_FLOW.md) - Fund movement & fees
+- [DATA_STRUCTURES.md](../design/DATA_STRUCTURES.md) - Contract interfaces
+
+### Development
+- [DEPLOYMENT.md](./DEPLOYMENT.md) - Deployment guide
+- [TESTING.md](./TESTING.md) - Testing guide

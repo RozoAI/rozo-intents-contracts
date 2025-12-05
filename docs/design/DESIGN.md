@@ -43,12 +43,26 @@ Example: `keccak256(abi.encodePacked(uuid))`
 | NEW | Sender deposited, waiting for fill |
 | FILLING | Relayer called `fill()`, awaiting messenger confirmation |
 | FILLED | Fill completed (via `notify()` or `slowFill()`) |
+| FAILED | Fill verification failed (mismatch in receiver, token, or amount) |
 | REFUNDED | Sender refunded after deadline |
 
 **Note:** There is no explicit EXPIRED status in storage. When `deadline` passes:
 - Intent remains in current status (NEW or FILLING)
 - `refund()` becomes callable
 - `refund()` sets status directly to REFUNDED
+
+### FAILED Status
+
+When `notify()` receives a payload that doesn't match the original intent:
+- Receiver address mismatch
+- Destination token mismatch
+- Amount paid < destinationAmount
+
+The intent is set to `FAILED`. Admin must manually investigate and can:
+- Change status back to NEW (allow retry)
+- Change status to FILLED (if payment was actually correct)
+- Update relayer address
+- Trigger refund
 
 ---
 
@@ -80,7 +94,7 @@ createIntent(sourceAmount, destinationAmount, ...)
 | `fill()` | Relayer | Mark as FILLING, record relayer |
 | `notify()` | Messenger only | Confirm fill → FILLED, pay relayer |
 | `slowFill()` | Relayer/Bot | Bridge via CCTP → FILLED directly (EVM only) |
-| `refund()` | Sender | Refund after deadline → REFUNDED |
+| `refund()` | Sender or refundAddress | Refund after deadline → REFUNDED |
 
 ### Destination Chain (where receiver gets paid)
 
@@ -99,7 +113,7 @@ Source Chain                 Destination Chain              Axelar
 1. createIntent()                   │                          │
    status = NEW                     │                          │
      │                              │                          │
-2. fill()                           │                          │
+2. fill() [optional step]           │                          │
    status = FILLING                 │                          │
    relayer recorded                 │                          │
      │                              │                          │
@@ -114,6 +128,32 @@ Source Chain                 Destination Chain              Axelar
 6. status = FILLED                  │                          │
    pay relayer                      │                          │
 ```
+
+### Fill Order Flexibility
+
+Relayer can choose order of operations:
+
+**Option A: fill() first (recommended)**
+1. Call `fill()` on source → status = FILLING, locks intent for this relayer
+2. Call `fillAndNotify()` on destination → pays receiver, sends Axelar message
+3. If `fillAndNotify()` fails, relayer still holds the lock but deadline will expire
+
+**Option B: fillAndNotify() first**
+1. Call `fillAndNotify()` on destination → pays receiver immediately
+2. Call `fill()` on source (if still NEW) → records relayer
+3. Risk: another relayer could call `fill()` between steps 1 and 2
+
+**Note:** `notify()` works for both NEW and FILLING status:
+- If NEW: records relayer from payload, sets to FILLED
+- If FILLING: verifies relayer matches, sets to FILLED
+
+### What If fillAndNotify() Fails?
+
+| Scenario | Result |
+|----------|--------|
+| Relayer called `fill()` first, then `fillAndNotify()` fails | Intent stays FILLING until deadline, then sender refunds |
+| Relayer called `fillAndNotify()` first, it fails | No state change, relayer can retry or abandon |
+| `fillAndNotify()` succeeds but `notify()` fails verification | Intent set to FAILED, admin investigates |
 
 ### Slow Fill (via CCTP Bridge, EVM only)
 ```
@@ -136,14 +176,37 @@ Source Chain (EVM)           CCTP                    Destination (EVM)
 
 ---
 
-## Admin (Minimal)
+## Admin Functions
 
+### Fee Management
 ```solidity
 setFeeRecipient(address)
 setProtocolFee(uint256)   // max 30 bps
 withdrawFees(token)       // feeRecipient withdraws accumulated fees
+```
+
+### Relayer Management
+```solidity
 addRelayer(address)
 removeRelayer(address)
+```
+
+### Intent Recovery (for FAILED status)
+```solidity
+// Admin can update intent status for recovery
+setIntentStatus(bytes32 intentId, IntentStatus status)
+
+// Admin can update relayer address (if wrong relayer recorded)
+setIntentRelayer(bytes32 intentId, address relayer)
+
+// Admin can force refund (for stuck intents)
+adminRefund(bytes32 intentId)
+```
+
+### Cross-Chain Configuration
+```solidity
+setTrustedContract(string chainName, string contractAddress)
+setMessenger(address messenger, bool allowed)
 ```
 
 ---
@@ -173,7 +236,7 @@ See [SLOWFILLED.md](./SLOWFILLED.md) for full details.
 
 **Fill Race Condition:** First-come-first-serve. The relayer who successfully changes status on-chain becomes responsible for the fill.
 
-See [RELAYER.md](./RELAYER.md) for full details.
+See [RELAYER.md](../development/RELAYER.md) for full details.
 
 ---
 
@@ -182,6 +245,24 @@ See [RELAYER.md](./RELAYER.md) for full details.
 **If no relayer fills → Sender gets full refund after deadline.**
 
 No fund loss possible. Worst case = wait for timeout.
+
+---
+
+## Contract Upgrade Strategy
+
+**No proxy pattern. No upgrades.**
+
+| Design Choice | Rationale |
+|---------------|-----------|
+| No fund storage | Funds are transient, not stored long-term |
+| Refund guarantee | Users can always refund after deadline |
+| Simple contracts | Easier to audit, fewer attack vectors |
+
+If contract changes are needed:
+1. Deploy new contract version
+2. Update trusted contracts on all chains
+3. Old intents can still be filled or refunded on old contract
+4. New intents use new contract
 
 ---
 
@@ -217,7 +298,37 @@ Both chains deploy RozoIntents contract. Flows work in both directions.
 - **Language:** Soroban smart contracts (Rust)
 - **Axelar GMP:** Axelar supports Stellar via GMP
 - **Address format:** Stellar uses 32-byte public keys (G... addresses), compatible with `bytes32`
-- **Token standard:** Stellar uses native token interface (not ERC-20)
+- **Token standard:** Stellar uses native token interface (SEP-41, not ERC-20)
+
+### Stellar Token Operations (USDC Example)
+
+```rust
+// Stellar USDC contract address (testnet example)
+const USDC_CONTRACT: Address = address!("CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA");
+
+// Transfer tokens in Soroban
+fn transfer_tokens(env: &Env, from: Address, to: Address, amount: i128) {
+    let token = token::Client::new(env, &USDC_CONTRACT);
+    token.transfer(&from, &to, &amount);
+}
+
+// Stellar USDC has 7 decimals
+// 100 USDC = 1_000_000_0 (7 zeros)
+```
+
+### Stellar Address Encoding
+
+```rust
+// Stellar G... address is 32 bytes (Ed25519 public key)
+// Can be used directly as bytes32 in cross-chain messages
+
+// Example: G... → bytes32
+let stellar_addr: Address = Address::from_string("GABC...");
+let bytes32_addr: BytesN<32> = stellar_addr.to_bytes();
+
+// Example: bytes32 → Stellar Address
+let addr: Address = Address::from_bytes(&bytes32_addr);
+```
 
 ### Fill Mode Support
 
@@ -234,8 +345,14 @@ Both chains deploy RozoIntents contract. Flows work in both directions.
 
 ## See Also
 
+### Design
 - [FUND_FLOW.md](./FUND_FLOW.md) - Fund movement & fees
-- [TERMINOLOGY.md](./TERMINOLOGY.md) - Terms and supported chains
-- [RELAYER.md](./RELAYER.md) - Relayer guide
+- [GLOSSARY.md](./GLOSSARY.md) - Terms and supported chains
 - [MESSENGER_DESIGN.md](./MESSENGER_DESIGN.md) - Messenger interface & Axelar
 - [SLOWFILLED.md](./SLOWFILLED.md) - SlowFill bridge fallback details
+- [DATA_STRUCTURES.md](./DATA_STRUCTURES.md) - Intent struct, events, errors
+
+### Development
+- [RELAYER.md](../development/RELAYER.md) - Relayer guide
+- [DEPLOYMENT.md](../development/DEPLOYMENT.md) - Deployment guide
+- [TESTING.md](../development/TESTING.md) - Testing guide
