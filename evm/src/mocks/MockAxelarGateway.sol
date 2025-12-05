@@ -22,11 +22,9 @@ contract MockAxelarGateway {
         validatedCalls[commandId] = validated;
     }
 
-    function callContract(
-        string calldata destinationChain,
-        string calldata contractAddress,
-        bytes calldata payload
-    ) external {
+    function callContract(string calldata destinationChain, string calldata contractAddress, bytes calldata payload)
+        external
+    {
         messages.push(Message(destinationChain, contractAddress, payload));
     }
 
@@ -35,7 +33,11 @@ contract MockAxelarGateway {
         string calldata, /* sourceChain */
         string calldata, /* sourceAddress */
         bytes32 /* payloadHash */
-    ) external view returns (bool) {
+    )
+        external
+        view
+        returns (bool)
+    {
         return validatedCalls[commandId];
     }
 
@@ -45,24 +47,22 @@ contract MockAxelarGateway {
     }
 
     // Helper to get message
-    function getMessage(uint256 index) external view returns (
-        string memory destinationChain,
-        string memory contractAddress,
-        bytes memory payload
-    ) {
+    function getMessage(uint256 index)
+        external
+        view
+        returns (string memory destinationChain, string memory contractAddress, bytes memory payload)
+    {
         Message storage m = messages[index];
         return (m.destinationChain, m.contractAddress, m.payload);
     }
 
     // Required interface methods (stub implementations)
-    function sendToken(
-        string calldata,
-        string calldata,
-        string calldata,
-        uint256
-    ) external pure {}
+    function sendToken(string calldata, string calldata, string calldata, uint256) external pure {}
 
     function tokenAddresses(string calldata) external pure returns (address) {
         return address(0);
     }
+
+    // Accept ETH for impersonation in tests
+    receive() external payable {}
 }

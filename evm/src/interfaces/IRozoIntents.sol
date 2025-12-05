@@ -3,28 +3,28 @@ pragma solidity ^0.8.24;
 
 /// @title Intent Status Enum
 enum IntentStatus {
-    NEW,      // Created, waiting for fill
-    FILLING,  // Relayer called fill(), awaiting confirmation
-    FILLED,   // Completed (via notify or slowFill)
-    FAILED,   // Fill verification failed (admin must investigate)
-    REFUNDED  // Sender refunded after deadline
+    NEW, // Created, waiting for fill
+    FILLING, // Relayer called fill(), awaiting confirmation
+    FILLED, // Completed (via notify or slowFill)
+    FAILED, // Fill verification failed (admin must investigate)
+    REFUNDED // Sender refunded after deadline
 }
 
 /// @title Intent Struct
 /// @notice Represents a cross-chain payment intent
 struct Intent {
-    bytes32 intentId;           // Unique identifier (off-chain generated)
-    address sender;             // Who created the intent
-    address refundAddress;      // Where to refund if expired (usually sender)
-    address sourceToken;        // Token deposited on source chain
-    uint256 sourceAmount;       // Amount deposited (source chain decimals)
+    bytes32 intentId; // Unique identifier (off-chain generated)
+    address sender; // Who created the intent
+    address refundAddress; // Where to refund if expired (usually sender)
+    address sourceToken; // Token deposited on source chain
+    uint256 sourceAmount; // Amount deposited (source chain decimals)
     uint256 destinationChainId; // Target chain ID
-    bytes32 destinationToken;   // Token on destination (bytes32 for cross-chain compatibility)
-    bytes32 receiver;           // Recipient on destination (bytes32 for cross-chain)
-    uint256 destinationAmount;  // Minimum amount receiver expects
-    uint64 deadline;            // Unix timestamp (seconds) - after this, refund allowed
-    IntentStatus status;        // Current state
-    address relayer;            // Who filled (set on fill())
+    bytes32 destinationToken; // Token on destination (bytes32 for cross-chain compatibility)
+    bytes32 receiver; // Recipient on destination (bytes32 for cross-chain)
+    uint256 destinationAmount; // Minimum amount receiver expects
+    uint64 deadline; // Unix timestamp (seconds) - after this, refund allowed
+    IntentStatus status; // Current state
+    address relayer; // Who filled (set on fill())
 }
 
 /// @title RozoIntents Errors
@@ -61,54 +61,23 @@ interface IRozoIntentsEvents {
         uint64 deadline
     );
 
-    event IntentFilling(
-        bytes32 indexed intentId,
-        address indexed relayer
-    );
+    event IntentFilling(bytes32 indexed intentId, address indexed relayer);
 
-    event IntentFilled(
-        bytes32 indexed intentId,
-        address indexed relayer,
-        uint256 amountPaid
-    );
+    event IntentFilled(bytes32 indexed intentId, address indexed relayer, uint256 amountPaid);
 
-    event IntentFailed(
-        bytes32 indexed intentId,
-        string reason
-    );
+    event IntentFailed(bytes32 indexed intentId, string reason);
 
-    event IntentRefunded(
-        bytes32 indexed intentId,
-        address indexed refundAddress,
-        uint256 amount
-    );
+    event IntentRefunded(bytes32 indexed intentId, address indexed refundAddress, uint256 amount);
 
-    event SlowFillTriggered(
-        bytes32 indexed intentId,
-        bytes32 bridgeMessageId,
-        address indexed caller
-    );
+    event SlowFillTriggered(bytes32 indexed intentId, bytes32 bridgeMessageId, address indexed caller);
 
     event IntentStatusChanged(
-        bytes32 indexed intentId,
-        IntentStatus oldStatus,
-        IntentStatus newStatus,
-        address indexed admin
+        bytes32 indexed intentId, IntentStatus oldStatus, IntentStatus newStatus, address indexed admin
     );
 
-    event IntentRelayerChanged(
-        bytes32 indexed intentId,
-        address oldRelayer,
-        address newRelayer,
-        address indexed admin
-    );
+    event IntentRelayerChanged(bytes32 indexed intentId, address oldRelayer, address newRelayer, address indexed admin);
 
-    event FillAndNotifySent(
-        bytes32 indexed intentId,
-        address indexed relayer,
-        bytes32 receiver,
-        uint256 amount
-    );
+    event FillAndNotifySent(bytes32 indexed intentId, address indexed relayer, bytes32 receiver, uint256 amount);
 
     event RelayerAdded(address indexed relayer);
     event RelayerRemoved(address indexed relayer);
@@ -167,13 +136,9 @@ interface IRozoIntentsDestination {
     /// @param token Token to transfer on destination chain
     /// @param amount Amount to pay receiver
     /// @param sourceChainId Source chain ID for Axelar callback routing
-    function fillAndNotify(
-        bytes32 intentId,
-        bytes32 receiver,
-        address token,
-        uint256 amount,
-        uint256 sourceChainId
-    ) external payable;
+    function fillAndNotify(bytes32 intentId, bytes32 receiver, address token, uint256 amount, uint256 sourceChainId)
+        external
+        payable;
 }
 
 /// @title RozoIntents Admin Interface
@@ -192,11 +157,7 @@ interface IRozoIntentsAdmin {
         bytes32 destinationToken,
         address bridgeAdapter
     ) external;
-    function removeSlowFillBridge(
-        uint256 destinationChainId,
-        address sourceToken,
-        bytes32 destinationToken
-    ) external;
+    function removeSlowFillBridge(uint256 destinationChainId, address sourceToken, bytes32 destinationToken) external;
     function setIntentStatus(bytes32 intentId, IntentStatus status) external;
     function setIntentRelayer(bytes32 intentId, address relayer) external;
     function adminRefund(bytes32 intentId) external;

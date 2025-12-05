@@ -22,14 +22,7 @@ contract MockAxelarGasService {
         bytes calldata payload,
         address refundAddress
     ) external payable {
-        gasPayments.push(GasPayment(
-            sender,
-            destinationChain,
-            destinationAddress,
-            payload,
-            refundAddress,
-            msg.value
-        ));
+        gasPayments.push(GasPayment(sender, destinationChain, destinationAddress, payload, refundAddress, msg.value));
     }
 
     function payNativeGasForContractCallWithToken(
@@ -41,14 +34,7 @@ contract MockAxelarGasService {
         uint256,
         address refundAddress
     ) external payable {
-        gasPayments.push(GasPayment(
-            sender,
-            destinationChain,
-            destinationAddress,
-            payload,
-            refundAddress,
-            msg.value
-        ));
+        gasPayments.push(GasPayment(sender, destinationChain, destinationAddress, payload, refundAddress, msg.value));
     }
 
     // Helper to get payment count
@@ -57,14 +43,18 @@ contract MockAxelarGasService {
     }
 
     // Helper to get payment
-    function getPayment(uint256 index) external view returns (
-        address sender,
-        string memory destinationChain,
-        string memory destinationAddress,
-        bytes memory payload,
-        address refundAddress,
-        uint256 value
-    ) {
+    function getPayment(uint256 index)
+        external
+        view
+        returns (
+            address sender,
+            string memory destinationChain,
+            string memory destinationAddress,
+            bytes memory payload,
+            address refundAddress,
+            uint256 value
+        )
+    {
         GasPayment storage p = gasPayments[index];
         return (p.sender, p.destinationChain, p.destinationAddress, p.payload, p.refundAddress, p.value);
     }

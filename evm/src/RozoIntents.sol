@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {IAxelarGateway} from "@axelar-network/axelar-gmp-sdk-solidity/contracts/interfaces/IAxelarGateway.sol";
-import {IAxelarGasService} from "@axelar-network/axelar-gmp-sdk-solidity/contracts/interfaces/IAxelarGasService.sol";
-
+import {Ownable} from "./utils/Ownable.sol";
+import {ReentrancyGuard} from "./utils/ReentrancyGuard.sol";
+import {SafeERC20, IERC20} from "./utils/SafeERC20.sol";
 import {
     Intent,
     IntentStatus,
@@ -19,10 +15,11 @@ import {
     IRozoIntentsAdmin,
     IRozoIntentsView
 } from "./interfaces/IRozoIntents.sol";
+import {IAxelarGateway, IAxelarGasService} from "./interfaces/axelar/IAxelarGateway.sol";
+import {IBridgeAdapter} from "./interfaces/IBridgeAdapter.sol";
 
 /// @title RozoIntents
-/// @notice Intent-based cross-chain payments. Base <-> Stellar (bidirectional).
-/// @dev No custom validators. Axelar handles verification.
+/// @notice Intent-based cross-chain settlement manager for Base ↔ Stellar and EVM routes
 contract RozoIntents is
     Ownable,
     ReentrancyGuard,
@@ -36,67 +33,39 @@ contract RozoIntents is
 {
     using SafeERC20 for IERC20;
 
-    // ============ Constants ============
-    uint256 public constant MAX_PROTOCOL_FEE = 30; // 30 bps = 0.3%
-    uint256 public constant BPS_DENOMINATOR = 10000;
+    uint256 private constant MAX_PROTOCOL_FEE_BPS = 30;
+    uint256 private constant BPS_DENOMINATOR = 10_000;
 
-    // ============ Immutables ============
-    IAxelarGateway public immutable gateway;
-    IAxelarGasService public immutable gasService;
-
-    // ============ Intent Storage ============
     mapping(bytes32 => Intent) private _intents;
-
-    // ============ Access Control ============
     mapping(address => bool) public relayers;
     mapping(address => bool) public messengers;
-
-    // ============ Cross-Chain Configuration ============
     mapping(string => string) public trustedContracts;
     mapping(uint256 => string) public chainIdToAxelarName;
-
-    // ============ SlowFill Configuration (EVM only) ============
-    // key = keccak256(abi.encodePacked(destinationChainId, sourceToken, destinationToken))
     mapping(bytes32 => address) public slowFillBridges;
-
-    // ============ Fee Configuration ============
-    uint256 public protocolFee;
     mapping(address => uint256) public accumulatedFees;
+
+    uint256 public protocolFee; // in basis points
     address public feeRecipient;
+    IAxelarGateway public gateway;
+    IAxelarGasService public gasService;
 
-    // ============ Constructor ============
-    constructor(
-        address _gateway,
-        address _gasService,
-        address _owner
-    ) Ownable(_owner) {
-        if (_gateway == address(0)) revert ZeroAddress();
-        if (_gasService == address(0)) revert ZeroAddress();
-
-        gateway = IAxelarGateway(_gateway);
-        gasService = IAxelarGasService(_gasService);
-        feeRecipient = _owner;
+    constructor(address owner_, address gateway_, address gasService_, address feeRecipient_) Ownable(owner_) {
+        if (gateway_ != address(0)) {
+            gateway = IAxelarGateway(gateway_);
+            messengers[gateway_] = true;
+            emit MessengerSet(gateway_, true);
+        }
+        if (gasService_ != address(0)) {
+            gasService = IAxelarGasService(gasService_);
+        }
+        if (feeRecipient_ != address(0)) {
+            feeRecipient = feeRecipient_;
+            emit FeeRecipientSet(feeRecipient_);
+        }
     }
 
-    // ============ Modifiers ============
-    modifier onlyRelayer() {
-        if (!relayers[msg.sender]) revert NotRelayer();
-        _;
-    }
+    // ========= User Functions =========
 
-    modifier onlyMessenger() {
-        if (!messengers[msg.sender]) revert NotMessenger();
-        _;
-    }
-
-    // ============ View Functions ============
-    function intents(bytes32 intentId) external view returns (Intent memory) {
-        return _intents[intentId];
-    }
-
-    // ============ User Functions ============
-
-    /// @inheritdoc IRozoIntentsUser
     function createIntent(
         bytes32 intentId,
         address sourceToken,
@@ -107,21 +76,23 @@ contract RozoIntents is
         uint256 destinationAmount,
         uint64 deadline,
         address refundAddress
-    ) external nonReentrant {
-        // Validate
-        if (_intents[intentId].sender != address(0)) revert IntentAlreadyExists();
+    ) external override nonReentrant {
+        if (intentId == bytes32(0)) revert InvalidPayload();
         if (sourceToken == address(0)) revert ZeroAddress();
-        if (sourceAmount == 0) revert InsufficientAmount(0, 1);
+        if (sourceAmount == 0 || destinationAmount == 0) revert InvalidPayload();
         if (deadline <= block.timestamp) revert InvalidDeadline();
-        if (refundAddress == address(0)) {
-            refundAddress = msg.sender;
-        }
 
-        // Store intent
+        Intent storage existing = _intents[intentId];
+        if (existing.sender != address(0)) revert IntentAlreadyExists();
+
+        address refund = refundAddress == address(0) ? msg.sender : refundAddress;
+
+        IERC20(sourceToken).safeTransferFrom(msg.sender, address(this), sourceAmount);
+
         _intents[intentId] = Intent({
             intentId: intentId,
             sender: msg.sender,
-            refundAddress: refundAddress,
+            refundAddress: refund,
             sourceToken: sourceToken,
             sourceAmount: sourceAmount,
             destinationChainId: destinationChainId,
@@ -133,51 +104,30 @@ contract RozoIntents is
             relayer: address(0)
         });
 
-        // Transfer tokens from sender to contract
-        IERC20(sourceToken).safeTransferFrom(msg.sender, address(this), sourceAmount);
-
         emit IntentCreated(
-            intentId,
-            msg.sender,
-            sourceToken,
-            sourceAmount,
-            destinationChainId,
-            receiver,
-            destinationAmount,
-            deadline
+            intentId, msg.sender, sourceToken, sourceAmount, destinationChainId, receiver, destinationAmount, deadline
         );
     }
 
-    /// @inheritdoc IRozoIntentsUser
-    function refund(bytes32 intentId) external nonReentrant {
-        Intent storage intent = _intents[intentId];
-
-        if (intent.sender == address(0)) revert IntentNotFound();
-        if (block.timestamp < intent.deadline) revert IntentNotExpired();
+    function refund(bytes32 intentId) external override nonReentrant {
+        Intent storage intent = _requireIntent(intentId);
         if (intent.status != IntentStatus.NEW && intent.status != IntentStatus.FILLING) {
             revert InvalidStatus(intent.status, IntentStatus.NEW);
         }
-
-        // Must be called by sender or refundAddress
-        if (msg.sender != intent.sender && msg.sender != intent.refundAddress) {
-            revert InvalidStatus(intent.status, IntentStatus.REFUNDED);
-        }
+        if (block.timestamp < intent.deadline) revert IntentNotExpired();
+        if (msg.sender != intent.sender && msg.sender != intent.refundAddress) revert NotRelayer();
 
         intent.status = IntentStatus.REFUNDED;
-
-        // Transfer full amount back to refundAddress
         IERC20(intent.sourceToken).safeTransfer(intent.refundAddress, intent.sourceAmount);
 
         emit IntentRefunded(intentId, intent.refundAddress, intent.sourceAmount);
     }
 
-    // ============ Relayer Functions ============
+    // ========= Relayer Functions =========
 
-    /// @inheritdoc IRozoIntentsRelayer
-    function fill(bytes32 intentId) external onlyRelayer nonReentrant {
-        Intent storage intent = _intents[intentId];
-
-        if (intent.sender == address(0)) revert IntentNotFound();
+    function fill(bytes32 intentId) external override nonReentrant {
+        if (!relayers[msg.sender]) revert NotRelayer();
+        Intent storage intent = _requireIntent(intentId);
         if (intent.status != IntentStatus.NEW) {
             revert InvalidStatus(intent.status, IntentStatus.NEW);
         }
@@ -189,206 +139,125 @@ contract RozoIntents is
         emit IntentFilling(intentId, msg.sender);
     }
 
-    /// @inheritdoc IRozoIntentsRelayer
-    function slowFill(bytes32 intentId) external onlyRelayer nonReentrant {
-        Intent storage intent = _intents[intentId];
-
-        if (intent.sender == address(0)) revert IntentNotFound();
-        if (intent.status != IntentStatus.NEW) {
-            revert InvalidStatus(intent.status, IntentStatus.NEW);
-        }
+    function slowFill(bytes32 intentId) external override nonReentrant {
+        if (!relayers[msg.sender]) revert NotRelayer();
+        Intent storage intent = _requireIntent(intentId);
+        if (intent.status != IntentStatus.NEW) revert InvalidStatus(intent.status, IntentStatus.NEW);
         if (block.timestamp >= intent.deadline) revert IntentExpired();
 
-        // Get bridge adapter for this route
-        bytes32 routeKey = keccak256(abi.encodePacked(
-            intent.destinationChainId,
-            intent.sourceToken,
-            intent.destinationToken
-        ));
-        address bridgeAdapter = slowFillBridges[routeKey];
-        if (bridgeAdapter == address(0)) revert SlowFillUnsupported();
+        bytes32 routeKey = _routeKey(intent.destinationChainId, intent.sourceToken, intent.destinationToken);
+        address bridge = slowFillBridges[routeKey];
+        if (bridge == address(0)) revert SlowFillUnsupported();
 
-        // Calculate fee (goes to protocol)
-        uint256 feeAmount = intent.sourceAmount * protocolFee / BPS_DENOMINATOR;
-        uint256 bridgeAmount = intent.sourceAmount - feeAmount;
+        uint256 feeAmount = _calculateProtocolFee(intent.sourceAmount);
+        uint256 amountToBridge = intent.sourceAmount - feeAmount;
+        if (amountToBridge < intent.destinationAmount) {
+            revert InsufficientAmount(amountToBridge, intent.destinationAmount);
+        }
 
-        // Update status before external call
         intent.status = IntentStatus.FILLED;
-
-        // Accumulate fee
         accumulatedFees[intent.sourceToken] += feeAmount;
 
-        // Transfer to bridge adapter
-        IERC20(intent.sourceToken).safeTransfer(bridgeAdapter, bridgeAmount);
+        IERC20(intent.sourceToken).safeTransfer(bridge, amountToBridge);
 
-        // TODO: Call bridge adapter to initiate CCTP transfer
-        // For now, emit event with placeholder
-        emit SlowFillTriggered(intentId, bytes32(0), msg.sender);
+        bytes32 bridgeMessageId = IBridgeAdapter(bridge)
+            .bridge(
+                intent.destinationChainId,
+                intent.receiver,
+                intent.sourceToken,
+                intent.destinationToken,
+                amountToBridge,
+                intent.refundAddress
+            );
+
+        emit SlowFillTriggered(intentId, bridgeMessageId, msg.sender);
     }
 
-    // ============ Destination Chain Functions ============
+    // ========= Destination Functions =========
 
-    /// @inheritdoc IRozoIntentsDestination
-    function fillAndNotify(
-        bytes32 intentId,
-        bytes32 receiver,
-        address token,
-        uint256 amount,
-        uint256 sourceChainId
-    ) external payable onlyRelayer nonReentrant {
-        if (amount == 0) revert InsufficientAmount(0, 1);
+    function fillAndNotify(bytes32 intentId, bytes32 receiver, address token, uint256 amount, uint256 sourceChainId)
+        external
+        payable
+        override
+        nonReentrant
+    {
+        if (!relayers[msg.sender]) revert NotRelayer();
+        if (token == address(0) || amount == 0) revert InvalidPayload();
+        address receiverAddress = _bytes32ToAddress(receiver);
+        if (receiverAddress == address(0)) revert InvalidPayload();
 
-        // Get source chain Axelar name
-        string memory sourceChain = chainIdToAxelarName[sourceChainId];
-        if (bytes(sourceChain).length == 0) revert UntrustedSource();
+        IERC20(token).safeTransferFrom(msg.sender, receiverAddress, amount);
 
-        // Get trusted contract on source chain
-        string memory sourceContract = trustedContracts[sourceChain];
-        if (bytes(sourceContract).length == 0) revert UntrustedSource();
+        string memory sourceChainName = chainIdToAxelarName[sourceChainId];
+        if (bytes(sourceChainName).length == 0) revert UntrustedSource();
 
-        // Transfer tokens from relayer to receiver
-        address receiverAddr = address(uint160(uint256(receiver)));
-        IERC20(token).safeTransferFrom(msg.sender, receiverAddr, amount);
+        string memory destinationAddress = trustedContracts[sourceChainName];
+        if (bytes(destinationAddress).length == 0) revert UntrustedSource();
 
-        // Build payload for source chain (5 parameters)
-        bytes memory payload = abi.encode(
-            intentId,
-            amount,
-            bytes32(uint256(uint160(msg.sender))),  // relayer address as bytes32
-            receiver,
-            bytes32(uint256(uint160(token)))         // destination token as bytes32
-        );
+        bytes memory payload =
+            abi.encode(intentId, amount, _addressToBytes32(msg.sender), receiver, _addressToBytes32(token));
 
-        // Pay for gas on destination (source chain for the callback)
+        address gasServiceAddress = address(gasService);
         if (msg.value > 0) {
+            if (gasServiceAddress == address(0)) revert ZeroAddress();
             gasService.payNativeGasForContractCall{value: msg.value}(
-                address(this),
-                sourceChain,
-                sourceContract,
-                payload,
-                msg.sender
+                address(this), sourceChainName, destinationAddress, payload, msg.sender
             );
         }
 
-        // Call Axelar Gateway to send message to source chain
-        gateway.callContract(sourceChain, sourceContract, payload);
+        address gatewayAddress = address(gateway);
+        if (gatewayAddress == address(0)) revert NotGateway();
+        gateway.callContract(sourceChainName, destinationAddress, payload);
 
         emit FillAndNotifySent(intentId, msg.sender, receiver, amount);
     }
 
-    // ============ Axelar Executable ============
+    // ========= Messenger Callback =========
 
-    /// @notice Called by Axelar Gateway to deliver cross-chain message
-    /// @dev Only callable by registered messenger (Axelar Gateway)
-    function execute(
+    function notify(
         bytes32 commandId,
         string calldata sourceChain,
         string calldata sourceAddress,
         bytes calldata payload
-    ) external onlyMessenger {
-        // Validate the contract call with Axelar Gateway
-        bytes32 payloadHash = keccak256(payload);
-        if (!gateway.validateContractCall(commandId, sourceChain, sourceAddress, payloadHash)) {
-            revert NotApprovedByGateway();
-        }
+    ) external nonReentrant {
+        if (!messengers[msg.sender]) revert NotMessenger();
+        if (msg.sender != address(gateway)) revert NotGateway();
 
-        // Verify source contract is trusted for this chain
-        if (keccak256(bytes(sourceAddress)) != keccak256(bytes(trustedContracts[sourceChain]))) {
+        bytes32 payloadHash = keccak256(payload);
+        bool approved = gateway.validateContractCall(commandId, sourceChain, sourceAddress, payloadHash);
+        if (!approved) revert NotApprovedByGateway();
+
+        string memory trusted = trustedContracts[sourceChain];
+        if (bytes(trusted).length == 0 || keccak256(bytes(trusted)) != keccak256(bytes(sourceAddress))) {
             revert UntrustedSource();
         }
 
-        // Decode payload (5 parameters)
-        (
-            bytes32 intentId,
-            uint256 amountPaid,
-            bytes32 relayerBytes,
-            bytes32 receiverBytes,
-            bytes32 destinationTokenBytes
-        ) = abi.decode(payload, (bytes32, uint256, bytes32, bytes32, bytes32));
+        (bytes32 intentId, uint256 amountPaid, bytes32 relayerBytes, bytes32 receiver, bytes32 destinationToken) =
+            abi.decode(payload, (bytes32, uint256, bytes32, bytes32, bytes32));
 
-        // Complete the fill
-        _completeFill(intentId, relayerBytes, amountPaid, receiverBytes, destinationTokenBytes);
+        _completeFill(intentId, amountPaid, relayerBytes, receiver, destinationToken);
     }
 
-    /// @dev Internal function to complete a fill after Axelar verification
-    function _completeFill(
-        bytes32 intentId,
-        bytes32 relayerBytes,
-        uint256 amountPaid,
-        bytes32 receiverBytes,
-        bytes32 destinationTokenBytes
-    ) internal nonReentrant {
-        Intent storage intent = _intents[intentId];
+    // ========= Admin =========
 
-        if (intent.sender == address(0)) revert IntentNotFound();
-
-        // Status must be NEW or FILLING
-        if (intent.status != IntentStatus.NEW && intent.status != IntentStatus.FILLING) {
-            revert InvalidStatus(intent.status, IntentStatus.NEW);
-        }
-
-        // Verify all parameters match the original intent
-        bool valid = true;
-        valid = valid && (intent.receiver == receiverBytes);
-        valid = valid && (intent.destinationToken == destinationTokenBytes);
-        valid = valid && (amountPaid >= intent.destinationAmount);
-
-        address relayerAddr = address(uint160(uint256(relayerBytes)));
-
-        // If FILLING, also verify relayer matches
-        if (intent.status == IntentStatus.FILLING) {
-            valid = valid && (intent.relayer == relayerAddr);
-        }
-
-        if (!valid) {
-            // Set to FAILED for admin investigation
-            intent.status = IntentStatus.FAILED;
-            emit IntentFailed(intentId, "Verification failed");
-            return;
-        }
-
-        // Mark as filled
-        intent.status = IntentStatus.FILLED;
-
-        // If was NEW (no fill() called), record relayer from payload
-        if (intent.relayer == address(0)) {
-            intent.relayer = relayerAddr;
-        }
-
-        // Calculate protocol fee (protocolFee is in bps)
-        uint256 feeAmount = intent.sourceAmount * protocolFee / BPS_DENOMINATOR;
-        uint256 payout = intent.sourceAmount - feeAmount;
-
-        // Accumulate fee for admin withdrawal
-        accumulatedFees[intent.sourceToken] += feeAmount;
-
-        // Transfer payout to relayer
-        IERC20(intent.sourceToken).safeTransfer(intent.relayer, payout);
-
-        emit IntentFilled(intentId, intent.relayer, amountPaid);
-    }
-
-    // ============ Admin Functions ============
-
-    /// @inheritdoc IRozoIntentsAdmin
-    function setFeeRecipient(address recipient) external onlyOwner {
+    function setFeeRecipient(address recipient) external override onlyOwner {
         if (recipient == address(0)) revert ZeroAddress();
         feeRecipient = recipient;
         emit FeeRecipientSet(recipient);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function setProtocolFee(uint256 feeBps) external onlyOwner {
-        if (feeBps > MAX_PROTOCOL_FEE) revert InvalidFee();
+    function setProtocolFee(uint256 feeBps) external override onlyOwner {
+        if (feeBps > MAX_PROTOCOL_FEE_BPS) revert InvalidFee();
         protocolFee = feeBps;
         emit ProtocolFeeSet(feeBps);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function withdrawFees(address token) external {
-        if (msg.sender != feeRecipient) revert NotMessenger();
+    function withdrawFees(address token) external override onlyOwner nonReentrant {
+        if (token == address(0)) revert ZeroAddress();
+        if (feeRecipient == address(0)) revert ZeroAddress();
+
         uint256 amount = accumulatedFees[token];
-        if (amount == 0) revert InsufficientAmount(0, 1);
+        if (amount == 0) return;
 
         accumulatedFees[token] = 0;
         IERC20(token).safeTransfer(feeRecipient, amount);
@@ -396,89 +265,81 @@ contract RozoIntents is
         emit FeesWithdrawn(token, feeRecipient, amount);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function addRelayer(address relayer) external onlyOwner {
+    function addRelayer(address relayer) external override onlyOwner {
         if (relayer == address(0)) revert ZeroAddress();
         relayers[relayer] = true;
         emit RelayerAdded(relayer);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function removeRelayer(address relayer) external onlyOwner {
+    function removeRelayer(address relayer) external override onlyOwner {
         relayers[relayer] = false;
         emit RelayerRemoved(relayer);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function setTrustedContract(string calldata chainName, string calldata contractAddress) external onlyOwner {
+    function setTrustedContract(string calldata chainName, string calldata contractAddress)
+        external
+        override
+        onlyOwner
+    {
+        if (bytes(chainName).length == 0) revert InvalidPayload();
         trustedContracts[chainName] = contractAddress;
         emit TrustedContractSet(chainName, contractAddress);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function setMessenger(address messenger, bool allowed) external onlyOwner {
+    function setMessenger(address messenger, bool allowed) external override onlyOwner {
         if (messenger == address(0)) revert ZeroAddress();
         messengers[messenger] = allowed;
+        if (allowed) {
+            gateway = IAxelarGateway(messenger);
+        } else if (address(gateway) == messenger) {
+            gateway = IAxelarGateway(address(0));
+        }
         emit MessengerSet(messenger, allowed);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function setChainIdToAxelarName(uint256 chainId, string calldata axelarName) external onlyOwner {
+    function setChainIdToAxelarName(uint256 chainId, string calldata axelarName) external override onlyOwner {
+        if (bytes(axelarName).length == 0) revert InvalidPayload();
         chainIdToAxelarName[chainId] = axelarName;
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
     function setSlowFillBridge(
         uint256 destinationChainId,
         address sourceToken,
         bytes32 destinationToken,
         address bridgeAdapter
-    ) external onlyOwner {
-        if (bridgeAdapter == address(0)) revert ZeroAddress();
-        bytes32 routeKey = keccak256(abi.encodePacked(destinationChainId, sourceToken, destinationToken));
-        slowFillBridges[routeKey] = bridgeAdapter;
+    ) external override onlyOwner {
+        if (bridgeAdapter == address(0) || sourceToken == address(0)) revert ZeroAddress();
+        bytes32 key = _routeKey(destinationChainId, sourceToken, destinationToken);
+        slowFillBridges[key] = bridgeAdapter;
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function removeSlowFillBridge(
-        uint256 destinationChainId,
-        address sourceToken,
-        bytes32 destinationToken
-    ) external onlyOwner {
-        bytes32 routeKey = keccak256(abi.encodePacked(destinationChainId, sourceToken, destinationToken));
-        delete slowFillBridges[routeKey];
+    function removeSlowFillBridge(uint256 destinationChainId, address sourceToken, bytes32 destinationToken)
+        external
+        override
+        onlyOwner
+    {
+        bytes32 key = _routeKey(destinationChainId, sourceToken, destinationToken);
+        slowFillBridges[key] = address(0);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function setIntentStatus(bytes32 intentId, IntentStatus status) external onlyOwner {
-        Intent storage intent = _intents[intentId];
-        if (intent.sender == address(0)) revert IntentNotFound();
-
-        IntentStatus oldStatus = intent.status;
+    function setIntentStatus(bytes32 intentId, IntentStatus status) external override onlyOwner {
+        Intent storage intent = _requireIntent(intentId);
+        IntentStatus old = intent.status;
         intent.status = status;
-
-        emit IntentStatusChanged(intentId, oldStatus, status, msg.sender);
+        emit IntentStatusChanged(intentId, old, status, msg.sender);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function setIntentRelayer(bytes32 intentId, address relayer) external onlyOwner {
-        Intent storage intent = _intents[intentId];
-        if (intent.sender == address(0)) revert IntentNotFound();
-
+    function setIntentRelayer(bytes32 intentId, address relayer) external override onlyOwner {
+        Intent storage intent = _requireIntent(intentId);
         address oldRelayer = intent.relayer;
         intent.relayer = relayer;
-
         emit IntentRelayerChanged(intentId, oldRelayer, relayer, msg.sender);
     }
 
-    /// @inheritdoc IRozoIntentsAdmin
-    function adminRefund(bytes32 intentId) external onlyOwner nonReentrant {
-        Intent storage intent = _intents[intentId];
-        if (intent.sender == address(0)) revert IntentNotFound();
-
-        // Can only admin refund if not already FILLED or REFUNDED
+    function adminRefund(bytes32 intentId) external override onlyOwner nonReentrant {
+        Intent storage intent = _requireIntent(intentId);
         if (intent.status == IntentStatus.FILLED || intent.status == IntentStatus.REFUNDED) {
-            revert InvalidStatus(intent.status, IntentStatus.NEW);
+            revert InvalidStatus(intent.status, IntentStatus.REFUNDED);
         }
 
         intent.status = IntentStatus.REFUNDED;
@@ -487,6 +348,81 @@ contract RozoIntents is
         emit IntentRefunded(intentId, intent.refundAddress, intent.sourceAmount);
     }
 
-    // ============ Receive ETH ============
-    receive() external payable {}
+    // ========= Views =========
+
+    function intents(bytes32 intentId) external view override returns (Intent memory) {
+        return _intents[intentId];
+    }
+
+    // ========= Internal =========
+
+    function _completeFill(
+        bytes32 intentId,
+        uint256 amountPaid,
+        bytes32 relayerBytes,
+        bytes32 receiver,
+        bytes32 destinationToken
+    ) internal {
+        Intent storage intent = _requireIntent(intentId);
+        if (intent.status != IntentStatus.NEW && intent.status != IntentStatus.FILLING) {
+            revert InvalidStatus(intent.status, IntentStatus.NEW);
+        }
+
+        address relayerAddress = _bytes32ToAddress(relayerBytes);
+        if (relayerAddress == address(0)) revert InvalidPayload();
+
+        if (intent.status == IntentStatus.FILLING) {
+            if (intent.relayer != relayerAddress) revert NotRelayer();
+        } else {
+            if (!relayers[relayerAddress]) revert NotRelayer();
+            intent.relayer = relayerAddress;
+        }
+
+        if (intent.receiver != receiver || intent.destinationToken != destinationToken) {
+            intent.status = IntentStatus.FAILED;
+            emit IntentFailed(intentId, "MISMATCH");
+            return;
+        }
+
+        if (amountPaid < intent.destinationAmount) {
+            intent.status = IntentStatus.FAILED;
+            emit IntentFailed(intentId, "AMOUNT");
+            return;
+        }
+
+        uint256 feeAmount = _calculateProtocolFee(intent.sourceAmount);
+        uint256 relayerPayout = intent.sourceAmount - feeAmount;
+        accumulatedFees[intent.sourceToken] += feeAmount;
+        intent.status = IntentStatus.FILLED;
+
+        IERC20(intent.sourceToken).safeTransfer(relayerAddress, relayerPayout);
+
+        emit IntentFilled(intentId, relayerAddress, amountPaid);
+    }
+
+    function _calculateProtocolFee(uint256 amount) internal view returns (uint256) {
+        return (amount * protocolFee) / BPS_DENOMINATOR;
+    }
+
+    function _routeKey(uint256 destinationChainId, address sourceToken, bytes32 destinationToken)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked(destinationChainId, sourceToken, destinationToken));
+    }
+
+    function _addressToBytes32(address value) internal pure returns (bytes32) {
+        return bytes32(uint256(uint160(value)));
+    }
+
+    function _bytes32ToAddress(bytes32 value) internal pure returns (address) {
+        return address(uint160(uint256(value)));
+    }
+
+    function _requireIntent(bytes32 intentId) internal view returns (Intent storage) {
+        Intent storage intent = _intents[intentId];
+        if (intent.sender == address(0)) revert IntentNotFound();
+        return intent;
+    }
 }
