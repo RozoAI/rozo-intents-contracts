@@ -73,9 +73,43 @@ setProtocolFee(uint256)   // max 30 bps
 
 ---
 
+## Relayer Management
+
+**Phase 1 (Current):** Admin whitelist only.
+
+```solidity
+addRelayer(address)
+removeRelayer(address)
+```
+
+**Phase 2 (Planned):** Open registration with bond/stake.
+
+See [RELAYER.md](./RELAYER.md) for full details.
+
+---
+
+## User Safety
+
+**If no relayer fills → User gets full refund after deadline.**
+
+No fund loss possible. Worst case = wait for timeout.
+
+---
+
+## Off-Chain vs On-Chain
+
+| Data | Location |
+|------|----------|
+| Intent state, funds | On-chain |
+| Relayer monitoring | Off-chain indexer |
+| Fill verification | Axelar (75+ validators) |
+
+---
+
 ## See Also
 
 - [AXELAR_GMP_DESIGN.md](./AXELAR_GMP_DESIGN.md) - Axelar details
 - [FEE.md](./FEE.md) - Fee structure (default 3 bps, max 30 bps)
 - [FUND_FLOW.md](./FUND_FLOW.md) - Fund movement
 - [TERMINOLOGY.md](./TERMINOLOGY.md) - Terms and supported chains
+- [RELAYER.md](./RELAYER.md) - Relayer guide and security

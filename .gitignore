@@ -1,1 +1,4 @@
-internal/
+reference/
+
+.DS_Store
+docs/.DS_Store
