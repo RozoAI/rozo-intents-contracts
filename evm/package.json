@@ -1,0 +1,17 @@
+{
+  "name": "rozo-intents-evm",
+  "version": "1.0.0",
+  "description": "RozoIntents EVM Contracts",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage",
+    "clean": "hardhat clean"
+  },
+  "devDependencies": {
+    "@axelar-network/axelar-gmp-sdk-solidity": "^5.10.0",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@openzeppelin/contracts": "^5.0.0",
+    "hardhat": "^2.22.0"
+  }
+}
