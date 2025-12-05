@@ -1,21 +1,31 @@
 # Messenger Design
 
-Messengers verify cross-chain fills and call `fillNotify()` on RozoIntents.
+Messengers verify cross-chain fills and call `notify()` on RozoIntents.
 
-## Interface
+## How It Works
 
-```solidity
-interface IMessenger {
-    /// @notice Called by destination chain to notify fill completion
-    function notifyFill(
-        bytes32 intentId,
-        uint256 amountPaid,
-        address relayer
-    ) external;
-}
-```
+1. Relayer calls `fillAndNotify()` on RozoIntents (destination chain)
+2. RozoIntents contract transfers tokens from relayer to receiver
+3. RozoIntents contract calls Axelar Gateway with payload
+4. Axelar validators verify the contract event actually happened
+5. Axelar Gateway calls `notify()` on RozoIntents (source chain)
+6. RozoIntents releases funds to relayer
 
-RozoIntents implements `fillNotify()` which only accepts calls from registered messengers.
+**Key:** The destination contract executes the payment, so Axelar verifies a real on-chain event - not just a relayer's claim.
+
+## Why Contract Must Execute Payment
+
+Axelar GMP verifies **contract events**, not arbitrary data:
+
+| Approach | Security |
+|----------|----------|
+| Relayer pays directly, submits txHash | Unsafe - contract can't verify txHash |
+| Relayer pays via contract | Safe - Axelar verifies contract event |
+
+The RozoIntents contract on destination chain must:
+1. Execute the token transfer (relayer → receiver)
+2. Emit event / call Axelar Gateway
+3. Axelar validators confirm this event happened
 
 ## Multi-Chain Support
 
@@ -33,7 +43,7 @@ contract RozoIntents {
         _;
     }
 
-    function fillNotify(
+    function notify(
         string calldata sourceChain,
         string calldata sourceContract,
         bytes calldata payload
@@ -45,8 +55,9 @@ contract RozoIntents {
             "Untrusted source"
         );
 
-        (bytes32 intentId, uint256 amountPaid, address relayer) =
-            abi.decode(payload, (bytes32, uint256, address));
+        // Relayer is bytes32 for cross-chain compatibility
+        (bytes32 intentId, uint256 amountPaid, bytes32 relayer) =
+            abi.decode(payload, (bytes32, uint256, bytes32));
 
         _completeFill(intentId, relayer, amountPaid);
     }
@@ -74,64 +85,71 @@ contract RozoIntents {
 
 | Chain | Contract |
 |-------|----------|
-| stellar | `RozoStellar address` |
-| ethereum | `RozoEthereum address` |
-| base | `RozoBase address` |
-| arbitrum | `RozoArbitrum address` |
+| stellar | `RozoIntentsStellar` |
+| ethereum | `RozoIntentsEthereum` |
+| base | `RozoIntentsBase` |
+| arbitrum | `RozoIntentsArbitrum` |
 
 ---
 
 ## Axelar Implementation
 
-### Flow
+### Flow (Base → Stellar)
 
 ```
-EVM (Base)                           Stellar
+Base (Source)                        Stellar (Destination)
 
 1. Sender: createIntent()
    └── status = NEW
+   └── funds locked
 
 2. Relayer: fill()
    └── status = FILLING
+   └── relayer recorded
 
-3.                                   Relayer pays receiver
+3.                                   Relayer: fillAndNotify()
+                                     └── contract transfers tokens
+                                         relayer → receiver
+                                     └── contract calls Axelar Gateway
 
-4.                                   Relayer calls RozoStellar.fill()
-                                     └── Axelar sends message
-
-5. Axelar Network
-   └── Validators verify tx
+4. Axelar Network
+   └── Validators verify Stellar contract event
    └── Relay message (~5-10 sec)
 
-6. Axelar Gateway calls fillNotify()
+5. Axelar Gateway calls notify() on RozoIntentsBase
+   └── validateContractCall() confirms Axelar approval
    └── status = FILLED
-   └── Relayer paid
+   └── Relayer paid (sourceAmount - protocolFee)
 ```
 
-### Stellar Contract (Soroban)
+### Flow (Stellar → Base)
 
-```rust
-pub fn fill(
-    env: Env,
-    caller: Address,
-    intent_id: BytesN<32>,
-    receiver: Address,
-    token: Address,
-    amount: i128,
-    destination_chain: String,
-    destination_contract: String,
-) {
-    caller.require_auth();
-
-    // Transfer payment atomically
-    token::transfer(&env, &caller, &receiver, amount);
-
-    // Send confirmation via Axelar
-    let payload = encode(intent_id, amount, caller);
-    gas_service.pay_gas(...);
-    axelar_gateway.call_contract(destination_chain, destination_contract, payload);
-}
 ```
+Stellar (Source)                     Base (Destination)
+
+1. Sender: createIntent()
+   └── status = NEW
+   └── funds locked
+
+2. Relayer: fill()
+   └── status = FILLING
+   └── relayer recorded
+
+3.                                   Relayer: fillAndNotify()
+                                     └── contract transfers tokens
+                                         relayer → receiver
+                                     └── contract calls Axelar Gateway
+
+4. Axelar Network
+   └── Validators verify Base contract event
+   └── Relay message (~5-10 sec)
+
+5. Axelar Gateway calls notify() on RozoIntentsStellar
+   └── status = FILLED
+   └── Relayer paid (sourceAmount - protocolFee)
+```
+
+**Key:** Both directions are symmetric. Destination contract always executes payment and sends Axelar message.
 
 ---
 
@@ -139,7 +157,7 @@ pub fn fill(
 
 | Check | Purpose |
 |-------|---------|
-| `onlyMessenger` | Only registered messengers can call fillNotify |
+| `onlyMessenger` | Only registered messengers can call notify |
 | `trustedContracts[chain]` | Verify source contract per chain |
 
 ---
