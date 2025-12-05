@@ -16,11 +16,11 @@
 
 | Term | Description |
 |------|-------------|
-| **Source Chain** | Where user deposits (Base) |
+| **Source Chain** | Where sender deposits (Base) |
 | **Destination Chain** | Where receiver gets paid (Stellar) |
 | **Sender** | User who initiates payment |
 | **Receiver** | Recipient on destination chain |
-| **Relayer** | Service that pays on destination, gets repaid on source |
+| **Relayer** | Service that pays on destination, gets repaid on source (aka Solver/Filler) |
 | **Messenger** | Cross-chain verification (Axelar) |
 
 ## Intent Type
@@ -36,17 +36,18 @@
 
 | Status | Description |
 |--------|-------------|
-| **NEW** | User deposited, waiting for relayer |
-| **FILLED** | Messenger confirmed, relayer paid |
+| **NEW** | Sender deposited, waiting for relayer |
+| **FILLING** | Relayer called fill()/slowFill(), processing |
+| **FILLED** | Messenger called fillNotify(), relayer paid |
 | **EXPIRED** | Deadline passed |
-| **REFUNDED** | User refunded |
+| **REFUNDED** | Sender refunded |
 
 ## Functions
 
-| Function | Who Calls | Description |
-|----------|-----------|-------------|
-| `createIntent` | User | Deposit funds |
-| `fillRelay` | Messenger | Confirm fill, pay relayer |
-| `slowFillIntent` | User | Bridge via CCTP/Allbridge |
-| `refund` | Anyone | Refund expired intent |
-| `flush` | Anyone | Sweep extra funds |
+| Function | Caller | Description |
+|----------|--------|-------------|
+| `createIntent()` | Sender | Deposit funds |
+| `fill()` | Relayer | Mark as FILLING (fast path) |
+| `slowFill()` | Relayer | Mark as FILLING (slow bridge path) |
+| `fillNotify()` | Messenger only | Confirm → FILLED, pay relayer |
+| `refund()` | Anyone | Refund expired intent |
