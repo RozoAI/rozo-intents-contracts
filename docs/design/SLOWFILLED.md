@@ -7,7 +7,7 @@ Base (Source)                                    Destination
      │                                                │
 1. Sender: createIntent()                             │
    └── deposit sourceAmount                           │
-   └── status = NEW                                   │
+   └── status = PENDING                               │
      │                                                │
 2. Relayer/Bot: slowFill()                            │
    └── deduct protocolFee                             │
@@ -22,7 +22,7 @@ Base (Source)                                    Destination
      │                                                ▼       │
      │                                           Receiver ◄───┘
      │
-     │  [If CCTP burn reverts, status stays NEW]
+     │  [If CCTP burn reverts, status stays PENDING]
      │
      └── refund() available after deadline
 ```
@@ -34,7 +34,7 @@ Base (Source)                                    Destination
 
 ## When SlowFill Runs
 
-- **Caller:** Whitelisted relayer or Rozo ops bot can call `slowFill(intentId)` once an intent is `NEW` and still within its deadline.
+- **Caller:** Whitelisted relayer or Rozo ops bot can call `slowFill(intentId)` once an intent is `PENDING` and still within its deadline.
 - **Caller incentive:** Rozo ops bot pays gas as a service.
 - **Preconditions:** The route must be marked as SlowFill-supported. Unsupported pairs revert.
 - **Use case:** Lack of fast liquidity, or user explicitly opts into slower settlement (~1–60 min) to guarantee delivery.
@@ -94,16 +94,16 @@ bytes32 routeKey = keccak256(abi.encodePacked(
 
 ## State Transitions
 
-1. Sender calls `createIntent()` on Base. Intent is stored as `NEW` with funds custodied by RozoIntents.
+1. Sender calls `createIntent()` on Base. Intent is stored as `PENDING` with funds custodied by RozoIntents.
 2. Relayer/bot calls `slowFill()`.
    - RozoIntents checks support list, consumes the intent, and calls the configured bridge (e.g., CCTP burn/mint).
    - The contract locks in protocol fees exactly as in fast fills.
-   - Status goes directly to `FILLED` because the contract now owns settlement responsibility; no `fill()` or `fillNotify()` will run afterward.
-3. Intent cannot be refunded after successful `slowFill()`. If the bridge call reverts, status stays `NEW` and the sender may retry or call `refund()` after the deadline.
+   - Status goes directly to `FILLED` because the contract now owns settlement responsibility; no `fillAndNotify()` will run afterward.
+3. Intent cannot be refunded after successful `slowFill()`. If the bridge call reverts, status stays `PENDING` and the sender may retry or call `refund()` after the deadline.
 
 ```
-createIntent() -> NEW
-NEW --slowFill()--> FILLED (bridge in flight)
+createIntent() -> PENDING
+PENDING --slowFill()--> FILLED (bridge in flight)
 ```
 
 ## Flow Across Chains
@@ -123,7 +123,7 @@ Base (source)                                 Arbitrum (destination)
 ### Components
 
 - **RozoIntentsBase**
-  - Validates intent is `NEW` and within deadline.
+  - Validates intent is `PENDING` and within deadline.
   - Checks route is SlowFill-supported via `slowFillBridges` mapping.
   - Deducts protocol fee from sourceAmount before bridging.
   - Calls bridge adapter with intent details.
@@ -308,8 +308,8 @@ Contract does NOT convert decimals. Frontend must account for decimal difference
 
 | Scenario | Status | Result |
 |----------|--------|--------|
-| CCTP burn reverts | Stays `NEW` | Funds remain in RozoIntents; sender can retry slowFill or refund after deadline |
-| Unsupported token/chain | Stays `NEW` | Revert with `SlowFillUnsupported` |
+| CCTP burn reverts | Stays `PENDING` | Funds remain in RozoIntents; sender can retry slowFill or refund after deadline |
+| Unsupported token/chain | Stays `PENDING` | Revert with `SlowFillUnsupported` |
 | CCTP burn succeeds, mint fails/stalls | `FILLED` | **No refund from RozoIntents.** User must claim from CCTP using `refundAddress`. Use `bridgeMessageId` from event to track. |
 
 ### Important: No Status Change on CCTP Failure After Burn
@@ -323,7 +323,7 @@ Once CCTP burn succeeds:
 ## Security Invariants
 
 - Only whitelisted relayers/bots can trigger `slowFill()` to prevent griefing via unnecessary bridge fees.
-- Each intent can enter slowFill at most once; status guard enforces `NEW` → `FILLED`.
+- Each intent can enter slowFill at most once; status guard enforces `PENDING` → `FILLED`.
 - Intent must be within deadline to slowFill.
 - All events (`SlowFillTriggered`) must include intent IDs for off-chain tracking.
 

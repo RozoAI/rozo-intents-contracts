@@ -2,7 +2,7 @@
 
 Intent-based cross-chain payments. Base ↔ Stellar (bidirectional).
 
-**No custom validators.** Axelar messenger handles verification.
+**Messenger options:** Users can choose between Axelar (third-party validator network) or Rozo Messenger (Rozo's custom messenger) when creating intents.
 
 ---
 
@@ -30,7 +30,7 @@ Example: `keccak256(abi.encodePacked(uuid))`
 
 ### Timing Rules
 
-- `fill()` / `slowFill()` → require `block.timestamp < deadline`
+- `fillAndNotify()` / `slowFill()` → require `block.timestamp < deadline`
 - `refund()` → require `block.timestamp >= deadline`
 - Near deadline: relayers may skip intent to avoid race with expiry
 
@@ -40,14 +40,13 @@ Example: `keccak256(abi.encodePacked(uuid))`
 
 | Status | Description |
 |--------|-------------|
-| NEW | Sender deposited, waiting for fill |
-| FILLING | Relayer called `fill()`, awaiting messenger confirmation |
+| PENDING | Sender deposited, waiting for fill |
 | FILLED | Fill completed (via `notify()` or `slowFill()`) |
 | FAILED | Fill verification failed (mismatch in receiver, token, or amount) |
 | REFUNDED | Sender refunded after deadline |
 
 **Note:** There is no explicit EXPIRED status in storage. When `deadline` passes:
-- Intent remains in current status (NEW or FILLING)
+- Intent remains in current status (PENDING)
 - `refund()` becomes callable
 - `refund()` sets status directly to REFUNDED
 
@@ -59,7 +58,7 @@ When `notify()` receives a payload that doesn't match the original intent:
 - Amount paid < destinationAmount
 
 The intent is set to `FAILED`. Admin must manually investigate and can:
-- Change status back to NEW (allow retry)
+- Change status back to PENDING (allow retry)
 - Change status to FILLED (if payment was actually correct)
 - Update relayer address
 - Trigger refund
@@ -90,8 +89,7 @@ createIntent(sourceAmount, destinationAmount, ...)
 
 | Function | Caller | Description |
 |----------|--------|-------------|
-| `createIntent()` | Sender | Deposit sourceAmount, lock funds |
-| `fill()` | Relayer | Mark as FILLING, record relayer |
+| `createIntent()` | Sender | Deposit sourceAmount, lock funds. Optionally assign relayer from RFQ. |
 | `notify()` | Messenger only | Confirm fill → FILLED, pay relayer |
 | `slowFill()` | Relayer/Bot | Bridge via CCTP → FILLED directly (EVM only) |
 | `refund()` | Sender or refundAddress | Refund after deadline → REFUNDED |
@@ -100,24 +98,25 @@ createIntent(sourceAmount, destinationAmount, ...)
 
 | Function | Caller | Description |
 |----------|--------|-------------|
-| `fillAndNotify()` | Relayer | Transfer to receiver + send Axelar message |
+| `fillAndNotify()` | Relayer | Transfer to receiver + send Axelar message. Includes `repaymentAddress` for cross-chain payout. |
 
 ---
 
 ## Flow
 
 ### Fast Fill (via Relayer + Axelar)
+
 ```
 Source Chain                 Destination Chain              Axelar
      │                              │                          │
-1. createIntent()                   │                          │
-   status = NEW                     │                          │
+1. RFQ Auction (off-chain)          │                          │
+   relayer assigned                 │                          │
      │                              │                          │
-2. fill() [optional step]           │                          │
-   status = FILLING                 │                          │
-   relayer recorded                 │                          │
+2. createIntent(relayer)            │                          │
+   status = PENDING                 │                          │
      │                              │                          │
-     │                       3. fillAndNotify()                │
+     │                       3. fillAndNotify(intentData, repaymentAddress)
+     │                          verify: not already filled     │
      │                          transfer: relayer → receiver   │
      │                          call Axelar Gateway ──────────►│
      │                              │                          │
@@ -126,41 +125,87 @@ Source Chain                 Destination Chain              Axelar
      │◄─────────────────────────────────────────── 5. notify()
      │                              │                          │
 6. status = FILLED                  │                          │
-   pay relayer                      │                          │
+   pay relayer (repaymentAddress)   │                          │
 ```
 
-### Fill Order Flexibility
+### RFQ (Request for Quote) System
 
-Relayer can choose order of operations:
+Instead of relayers racing on-chain to claim intents, an off-chain RFQ auction determines the relayer before intent creation:
 
-**Option A: fill() first (recommended)**
-1. Call `fill()` on source → status = FILLING, locks intent for this relayer
-2. Call `fillAndNotify()` on destination → pays receiver, sends Axelar message
-3. If `fillAndNotify()` fails, relayer still holds the lock but deadline will expire
+```
+User                    RFQ Server              Relayers            Source Chain
+  │                         │                      │                     │
+  │ Request quote ─────────►│                      │                     │
+  │                         │ Broadcast ──────────►│                     │
+  │                         │                      │                     │
+  │                         │◄──── Bids ───────────│                     │
+  │                         │                      │                     │
+  │◄─── Best quote ─────────│                      │                     │
+  │     (price + relayer)   │                      │                     │
+  │                         │                      │                     │
+  │ Accept & createIntent(relayer = winner) ──────────────────────────►│
+  │                         │                      │                     │
+  │                         │                      │  fillAndNotify() ──►│
+```
 
-**Option B: fillAndNotify() first**
-1. Call `fillAndNotify()` on destination → pays receiver immediately
-2. Call `fill()` on source (if still NEW) → records relayer
-3. Risk: another relayer could call `fill()` between steps 1 and 2
+**Benefits:**
+- No gas spent on source chain by relayers
+- Competitive pricing through auction
+- Users see quote before committing
+- Single event to watch (`IntentCreated`)
 
-**Note:** `notify()` works for both NEW and FILLING status:
-- If NEW: records relayer from payload, sets to FILLED
-- If FILLING: verifies relayer matches, sets to FILLED
+**Open Intents:** If `relayer = address(0)`, any whitelisted relayer can fill. Used when no RFQ bids received.
+
+### Destination Chain Fill Protection
+
+The destination chain tracks filled intents using a hash of the full `IntentData` struct to prevent:
+- Double-fill attacks (same intent filled twice)
+- Parameter tampering (filling with wrong amounts)
+- Cross-chain replay attacks
+
+```solidity
+// Destination chain storage
+mapping(bytes32 => bool) public filledIntents;  // fillHash => filled
+
+// Fill hash computed from ALL intent parameters
+bytes32 fillHash = keccak256(abi.encode(intentData, block.chainid));
+require(!filledIntents[fillHash], "AlreadyFilled");
+filledIntents[fillHash] = true;
+```
+
+### Cross-Chain Repayment Address
+
+Relayers specify a `repaymentAddress` in `fillAndNotify()` to receive payment on the source chain. This solves the cross-chain address mismatch problem:
+
+- Stellar and EVM use different key formats
+- Relayer's destination chain address cannot be derived to a valid source chain address
+- `repaymentAddress` is passed through Axelar and used for payout on source chain
+
+```
+Relayer fills on Stellar (G... address)
+    ↓
+fillAndNotify(intentData, repaymentAddress: 0x1234...)
+    ↓
+Axelar message includes repaymentAddress
+    ↓
+notify() on Base pays 0x1234... (relayer's EVM address)
+```
 
 ### What If fillAndNotify() Fails?
 
 | Scenario | Result |
 |----------|--------|
-| Relayer called `fill()` first, then `fillAndNotify()` fails | Intent stays FILLING until deadline, then sender refunds |
-| Relayer called `fillAndNotify()` first, it fails | No state change, relayer can retry or abandon |
+| Intent already filled on destination | Transaction reverts with "AlreadyFilled" |
 | `fillAndNotify()` succeeds but `notify()` fails verification | Intent set to FAILED, admin investigates |
+| Relayer never fills | Intent stays PENDING until deadline, then sender refunds |
 
 ### Slow Fill (via CCTP Bridge, EVM only)
+
 ```
 Source Chain (EVM)           CCTP                    Destination (EVM)
      │                          │                          │
 1. createIntent()               │                          │
-   status = NEW                 │                          │
+   status = PENDING             │                          │
      │                          │                          │
 2. slowFill()                   │                          │
    deduct fee                   │                          │
@@ -215,8 +260,8 @@ setMessenger(address messenger, bool allowed)
 
 | Mode | Function | Speed | Status Flow | Relayer Profit |
 |------|----------|-------|-------------|----------------|
-| Fast | `fill()` + `notify()` | ~5-10 sec | NEW → FILLING → FILLED | Yes (spread) |
-| Slow | `slowFill()` | ~1-60 min | NEW → FILLED | No (service only) |
+| Fast | `fillAndNotify()` + `notify()` | ~5-10 sec | PENDING → FILLED | Yes (spread) |
+| Slow | `slowFill()` | ~1-60 min | PENDING → FILLED | No (service only) |
 
 **Fast Fill:** Relayer pays on destination, gets repaid on source (earns spread).
 
@@ -234,7 +279,7 @@ See [SLOWFILLED.md](./SLOWFILLED.md) for full details.
 
 **Bond/Guarantee:** Off-chain (legal agreement / escrow).
 
-**Fill Race Condition:** First-come-first-serve. The relayer who successfully changes status on-chain becomes responsible for the fill.
+**Relayer Assignment:** Via RFQ auction (off-chain) before intent creation. Assigned relayer address is passed to `createIntent()`. If no relayer assigned (`address(0)`), any whitelisted relayer can fill.
 
 See [RELAYER.md](../development/RELAYER.md) for full details.
 
@@ -271,8 +316,10 @@ If contract changes are needed:
 | Data | Location |
 |------|----------|
 | Intent state, funds | On-chain |
+| RFQ auction | Off-chain (WebSocket server) |
 | Relayer monitoring | Off-chain indexer |
 | Fill verification | Axelar (75+ validators) |
+| Fill tracking (destination) | On-chain (filledIntents mapping) |
 
 ---
 

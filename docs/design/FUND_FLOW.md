@@ -7,32 +7,40 @@ Funds are **transient**, not stored. They move within seconds.
 ## Fast Fill Flow
 
 ```
-Sender              Relayer              Destination Contract        Axelar
-  │                    │                        │                       │
-  │ createIntent()     │                        │                       │
-  │ (deposit funds)    │                        │                       │
-  ▼                    │                        │                       │
- NEW                   │                        │                       │
-  │                    │                        │                       │
-  │              fill()                         │                       │
-  │              (claim intent)                 │                       │
-  │                    ▼                        │                       │
-  │                 FILLING                     │                       │
-  │                    │                        │                       │
-  │                    │   fillAndNotify() ────►│                       │
-  │                    │                        │ transfer tokens       │
-  │                    │                        │ relayer → receiver    │
-  │                    │                        │                       │
-  │                    │                        │ call Axelar ─────────►│
-  │                    │                        │                       │
-  │                    │                        │                notify()
-  │                    │                        │                (confirms)
-  │                    ▼                        │                       │
-  │                 FILLED ◄────────────────────────────────────────────┘
-  │              (relayer paid)
+Sender              RFQ Server           Relayer              Destination Contract        Axelar
+  │                     │                   │                        │                       │
+  │ Request quote ─────►│                   │                        │                       │
+  │                     │ Broadcast ───────►│                        │                       │
+  │                     │◄──── Bid ─────────│                        │                       │
+  │◄─── Best quote ─────│                   │                        │                       │
+  │                     │                   │                        │                       │
+  │ createIntent(relayer)                   │                        │                       │
+  │ (deposit funds)     │                   │                        │                       │
+  ▼                     │                   │                        │                       │
+PENDING                 │                   │                        │                       │
+  │                     │                   │                        │                       │
+  │                     │                   │   fillAndNotify() ────►│                       │
+  │                     │                   │                        │ verify: assigned relayer
+  │                     │                   │                        │ verify: not filled    │
+  │                     │                   │                        │ transfer tokens       │
+  │                     │                   │                        │ relayer → receiver    │
+  │                     │                   │                        │                       │
+  │                     │                   │                        │ call Axelar ─────────►│
+  │                     │                   │                        │                       │
+  │                     │                   │                        │                notify()
+  │                     │                   │                        │                (confirms)
+  │                     │                   ▼                        │                       │
+  │                     │                FILLED ◄────────────────────────────────────────────┘
+  │                     │              (relayer paid to repaymentAddress)
 ```
 
-**Key:** Relayer calls `fillAndNotify()` on destination contract. Contract executes payment, then Axelar verifies the event.
+**Key points:**
+- RFQ auction determines relayer before intent creation
+- Relayer calls `fillAndNotify()` on destination contract with `IntentData` + `repaymentAddress`
+- Contract verifies relayer assignment (if not open intent)
+- Contract tracks fill via `filledIntents` mapping to prevent double-fills
+- Axelar verifies the event and triggers `notify()` on source chain
+- Payment goes to `repaymentAddress` (solves cross-chain address mismatch)
 
 ## Slow Fill Flow
 
@@ -42,7 +50,7 @@ Sender                     Relayer/Bot                 CCTP
   │ createIntent()           │                           │
   │ (deposit funds)          │                           │
   ▼                          │                           │
- NEW                         │                           │
+PENDING                      │                           │
   │                          │                           │
   │                    slowFill()                        │
   │                    (triggers bridge)                 │
@@ -62,12 +70,13 @@ FILLED                    (done)                         │
   │                                              gets funds
 ```
 
-**Key difference:** SlowFill goes directly from NEW → FILLED. No FILLING state.
+**Key difference:** SlowFill goes directly from PENDING → FILLED. No intermediate state.
 
 ## Fund Locations
 
 ```
 Sender Wallet ──► RozoIntents ──┬──► Relayer (sourceAmount - protocolFee)
+                               │    (to repaymentAddress)
                                │
                                └──► Protocol Fee ──► feeRecipient
 ```
@@ -84,7 +93,7 @@ Sender specifies both amounts when creating intent:
 **Fees calculated by frontend upfront.** Contract simply:
 1. Locks `sourceAmount`
 2. Verifies `amountPaid >= destinationAmount`
-3. Releases `sourceAmount - protocolFee` to relayer
+3. Releases `sourceAmount - protocolFee` to relayer's `repaymentAddress`
 4. Accumulates `protocolFee` for admin withdrawal
 
 ## Example
@@ -98,7 +107,7 @@ Protocol fee: 3 bps = 0.3 USDC
 
 Relayer fills:
 - Pays receiver: 995 USDC (on Stellar)
-- Receives: 999.7 USDC (1000 - 0.3 protocolFee) (on Base)
+- Receives: 999.7 USDC (1000 - 0.3 protocolFee) (on Base, to repaymentAddress)
 - Profit: 4.7 USDC (minus gas costs)
 ```
 
@@ -147,7 +156,7 @@ Protocol fee can be taken from the spread. Configured via admin:
 relayerPayout = sourceAmount - protocolFee
 ```
 
-Relayer pays `destinationAmount` on destination, receives `sourceAmount - protocolFee` on source.
+Relayer pays `destinationAmount` on destination, receives `sourceAmount - protocolFee` on source (to their `repaymentAddress`).
 
 ---
 
@@ -162,7 +171,11 @@ Chain Decimals:
 
 User wants to send 100 USDC from Base to Stellar:
 
-1. Frontend calculates:
+1. User requests quote from RFQ server
+   - RFQ broadcasts to relayers
+   - Best bid: 99.5 USDC output, relayer = 0xABC...
+
+2. Frontend calculates:
    - sourceAmount:      100_000000      (100 USDC, 6 decimals on Base)
    - protocolFee:           30000       (0.03 USDC, 3 bps of 100)
    - relayerSpread:        470000       (0.47 USDC)
@@ -170,13 +183,14 @@ User wants to send 100 USDC from Base to Stellar:
                         ^^^^^^^^^^^
                         Note: 7 zeros for Stellar!
 
-2. User approves & calls createIntent():
+3. User approves & calls createIntent(relayer = 0xABC...):
    - Deposits: 100_000000   (Base USDC, 6 decimals)
    - Expects:  995_0000000  (Stellar USDC, 7 decimals)
 
-3. Relayer fills:
+4. Assigned relayer fills (0xABC...):
+   - Calls fillAndNotify(intentData, repaymentAddress: 0xABC...)
    - Pays receiver: 995_0000000 (Stellar USDC, 7 decimals = 99.5 USDC)
-   - Receives:       99_970000  (Base USDC, 6 decimals = 99.97 USDC)
+   - Receives:       99_970000  (Base USDC, 6 decimals = 99.97 USDC) to repaymentAddress
    - Profit:         0.47 USDC (spread) minus gas costs
 ```
 
@@ -254,7 +268,7 @@ Frontend sets:
 
 Relayer:
 - Pays receiver: 997_0000000 (7 decimals on Stellar = 99.7 USDC)
-- Receives: 100_000000 - protocolFee (6 decimals on Base)
+- Receives: 100_000000 - protocolFee (6 decimals on Base) to repaymentAddress
 - Profit: spread minus gas costs
 ```
 
@@ -281,7 +295,7 @@ See [GLOSSARY.md](./GLOSSARY.md) for full token support matrix.
 If intent expires (deadline passed), refund can be triggered:
 
 ```
-NEW or FILLING ──► (deadline passes) ──► refund() ──► REFUNDED
+PENDING ──► (deadline passes) ──► refund() ──► REFUNDED
 ```
 
 - **No fee on refund** - full `sourceAmount` returned
@@ -295,3 +309,6 @@ NEW or FILLING ──► (deadline passes) ──► refund() ──► REFUNDED
 - Funds tracked by intentId
 - Only Messenger can call `notify()`
 - Deadline protection: sender can always refund
+- Destination chain tracks fills via `filledIntents` to prevent double-fills
+- Relayer verification on destination chain (for assigned intents)
+- `repaymentAddress` specified by relayer for cross-chain payout

@@ -76,25 +76,52 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 
 | Status | Description |
 |--------|-------------|
-| **NEW** | Sender deposited, waiting for fill |
-| **FILLING** | Relayer called `fill()`, awaiting messenger confirmation |
+| **PENDING** | Sender deposited, waiting for fill |
 | **FILLED** | Fill completed (via `notify()` or `slowFill()`) |
 | **FAILED** | Fill verification failed, admin must investigate |
 | **REFUNDED** | Sender refunded |
 
 ## Functions
 
+### Source Chain
+
 | Function | Caller | Description |
 |----------|--------|-------------|
-| `createIntent()` | Sender | Deposit funds |
-| `fill()` | Relayer | Mark as FILLING (fast path, awaits notify) |
+| `createIntent()` | Sender | Deposit funds, optionally assign relayer from RFQ |
 | `slowFill()` | Relayer | Bridge via CCTP → FILLED directly |
 | `notify()` | Messenger only | Confirm fast fill → FILLED, pay relayer |
 | `refund()` | Sender or refundAddress | Refund expired intent |
+
+### Destination Chain
+
+| Function | Caller | Description |
+|----------|--------|-------------|
+| `fillAndNotify()` | Relayer | Pay receiver, specify repayment address, send Axelar message |
 
 ## Fill Modes
 
 | Mode | Status Flow | Relayer Profit |
 |------|-------------|----------------|
-| **Fast Fill** | NEW → FILLING → FILLED | Yes (spread) |
-| **Slow Fill** | NEW → FILLED | No (service only) |
+| **Fast Fill** | PENDING → FILLED | Yes (spread) |
+| **Slow Fill** | PENDING → FILLED | No (service only) |
+
+## RFQ Terms
+
+| Term | Description |
+|------|-------------|
+| **Quote Request** | User's request for price quote from relayers |
+| **Quote Bid** | Relayer's price offer for filling an intent |
+| **Auction Window** | Time period for relayers to submit bids |
+| **Open Intent** | Intent with `relayer = address(0)`, any whitelisted relayer can fill |
+| **Assigned Intent** | Intent with specific relayer address, only that relayer can fill |
+
+## Security Terms
+
+| Term | Description |
+|------|-------------|
+| **filledIntents** | Mapping on destination chain tracking filled intents (prevents double-fill) |
+| **Relayer Whitelist** | Admin-managed list of allowed relayers |
+| **Trusted Contracts** | Cross-chain contract addresses verified for Axelar messages |
+| **Repayment Address** | Relayer's address on source chain where payout is sent |
+| **IntentData** | Struct containing all intent parameters, passed to destination chain |
+| **Fill Hash** | Hash of IntentData used to track fills on destination chain |
