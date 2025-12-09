@@ -111,7 +111,11 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 |------|-------------|
 | **Quote Request** | User's request for price quote from relayers |
 | **Quote Bid** | Relayer's price offer for filling an intent |
-| **Auction Window** | Time period for relayers to submit bids |
+| **Auction Window** | Time period for relayers to submit bids (3 seconds) |
+| **Fulfillment Threshold** | Maximum time for winning relayer to fulfill (10 seconds) |
+| **Rozo Relayer Fallback** | Rozo relayer executes fill if winner doesn't fulfill within 10 seconds |
+| **Relayer Deposit** | Funds deposited by relayers as collateral for whitelisting |
+| **Penalty System** | Relayers who win but fail to fulfill are penalized from their deposits |
 | **Open Intent** | Intent with `relayer = address(0)`, any whitelisted relayer can fill |
 | **Assigned Intent** | Intent with specific relayer address, only that relayer can fill |
 

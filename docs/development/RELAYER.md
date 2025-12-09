@@ -112,6 +112,24 @@ User                    RFQ Server              Relayers            Source Chain
 - User opts out of RFQ (accepts market price)
 - ROZO backup relayer fills unclaimed intents
 
+### RFQ Timing and Guarantees
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| **Auction Window** | 3 seconds | Time for relayers to submit bids |
+| **Fulfillment Threshold** | 10 seconds | Maximum time for winning relayer to call `fillAndNotify()` |
+| **Rozo Relayer Fallback** | After 10s | If no fulfillment, Rozo relayer executes the fill |
+
+**Relayer Requirements:**
+- Relayers must deposit funds to be whitelisted
+- Winning an auction creates a commitment to fulfill within 10 seconds
+- **Penalty:** If a relayer wins an auction but fails to fulfill within 10 seconds (triggering Rozo relayer fallback), they are penalized from their deposited funds
+
+**Why deposits and penalties?**
+- Ensures fast fulfillment (10-second guarantee)
+- Requires relayers to be high quality and reliable
+- Prevents gaming the RFQ system
+
 ---
 
 ## Fast Fill Flow (Base → Stellar)
