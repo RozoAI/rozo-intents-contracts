@@ -2,7 +2,7 @@
 
 Intent-based cross-chain payments. Base ↔ Stellar (bidirectional).
 
-**Messenger options:** Users can choose between Axelar (third-party validator network) or Rozo Messenger (Rozo's custom messenger) when creating intents.
+**No custom validators.** Axelar messenger handles verification.
 
 ---
 
