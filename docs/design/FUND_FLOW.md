@@ -7,7 +7,7 @@ Funds are **transient**, not stored. They move within seconds.
 ## Fast Fill Flow
 
 ```
-Sender              RFQ Server           Relayer              Destination Contract        Axelar
+Sender              RFQ Server           Relayer              Destination Contract        Messenger
   │                     │                   │                        │                       │
   │ Request quote ─────►│                   │                        │                       │
   │                     │ Broadcast ───────►│                        │                       │
@@ -20,15 +20,16 @@ Sender              RFQ Server           Relayer              Destination Contra
 PENDING                 │                   │                        │                       │
   │                     │                   │                        │                       │
   │                     │                   │   fillAndNotify() ────►│                       │
-  │                     │                   │                        │ verify: assigned relayer
+  │                     │                   │   (+ messengerId)      │ verify: assigned relayer
   │                     │                   │                        │ verify: not filled    │
   │                     │                   │                        │ transfer tokens       │
   │                     │                   │                        │ relayer → receiver    │
   │                     │                   │                        │                       │
-  │                     │                   │                        │ call Axelar ─────────►│
+  │                     │                   │                        │ call messenger ──────►│
   │                     │                   │                        │                       │
+  │                     │                   │                        │   (Rozo: ~1-3 sec)    │
+  │                     │                   │                        │   (Axelar: ~5-10 sec) │
   │                     │                   │                        │                notify()
-  │                     │                   │                        │                (confirms)
   │                     │                   ▼                        │                       │
   │                     │                FILLED ◄────────────────────────────────────────────┘
   │                     │              (relayer paid to repaymentAddress)
@@ -36,10 +37,10 @@ PENDING                 │                   │                        │    
 
 **Key points:**
 - RFQ auction determines relayer before intent creation
-- Relayer calls `fillAndNotify()` on destination contract with `IntentData` + `repaymentAddress`
+- Relayer calls `fillAndNotify()` on destination contract with `IntentData`, `repaymentAddress`, and `messengerId`
 - Contract verifies relayer assignment (if not open intent)
 - Contract tracks fill via `filledIntents` mapping to prevent double-fills
-- Axelar verifies the event and triggers `notify()` on source chain
+- Messenger verifies the event and triggers `notify()` on source chain (Rozo: ~1-3 sec, Axelar: ~5-10 sec)
 - Payment goes to `repaymentAddress` (solves cross-chain address mismatch)
 
 ## Fund Locations
@@ -263,8 +264,9 @@ PENDING ──► (deadline passes) ──► refund() ──► REFUNDED
 ## Security
 
 - Funds tracked by intentId
-- Only Messenger can call `notify()`
+- Only registered messenger adapters can call `notify()`
 - Deadline protection: sender can always refund
 - Destination chain tracks fills via `filledIntents` to prevent double-fills
 - Relayer verification on destination chain (for assigned intents)
 - `repaymentAddress` specified by relayer for cross-chain payout
+- `fillHash` verification ensures intent parameters weren't tampered

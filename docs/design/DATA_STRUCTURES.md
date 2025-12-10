@@ -22,8 +22,8 @@ contract RozoIntents {
     // Trusted contracts per chain (for cross-chain verification)
     mapping(string => string) public trustedContracts;  // chainName => contractAddress
 
-    // Chain ID to Axelar chain name mapping (REQUIRED for fillAndNotify routing)
-    mapping(uint256 => string) public chainIdToAxelarName;  // e.g., 8453 => "base", 1500 => "stellar"
+    // Messenger adapters (supports multiple messengers via adapter pattern)
+    mapping(uint8 => IMessengerAdapter) public messengerAdapters;  // messengerId => adapter (0=Rozo, 1=Axelar)
 
     // ============ Fee Configuration ============
     // Protocol fee in basis points (max 30 bps = 0.3%)
@@ -55,11 +55,8 @@ contract RozoIntentsDestination {
     // Trusted contracts per chain
     mapping(string => string) public trustedContracts;
 
-    // Chain ID to Axelar chain name mapping
-    mapping(uint256 => string) public chainIdToAxelarName;
-
-    // Axelar Gateway
-    IGateway public gateway;
+    // Messenger adapters (supports multiple messengers via adapter pattern)
+    mapping(uint8 => IMessengerAdapter) public messengerAdapters;  // messengerId => adapter (0=Rozo, 1=Axelar)
 
     // Owner
     address public owner;
@@ -278,22 +275,22 @@ require(block.timestamp <= intentData.deadline, "IntentExpired");
 
 ## notify Payload
 
-When Axelar delivers a fill confirmation, the payload contains 5 parameters:
+When a messenger delivers a fill confirmation, the payload contains 3 parameters (minimal payload for security):
 
 ```solidity
 struct NotifyPayload {
     bytes32 intentId;           // Which intent was filled
-    uint256 amountPaid;         // Amount actually paid to receiver
+    bytes32 fillHash;           // Hash of all intent parameters (verified on source)
     bytes32 repaymentAddress;   // Where to send payout on source chain
-    bytes32 receiver;           // Receiver address (for verification)
-    bytes32 destinationToken;   // Token paid (for verification)
 }
 ```
 
 Encoding (sent by `fillAndNotify()`):
 ```solidity
-bytes memory payload = abi.encode(intentId, amountPaid, repaymentAddress, receiver, destinationToken);
+bytes memory payload = abi.encode(intentId, fillHash, repaymentAddress);
 ```
+
+**Security:** The source chain recomputes `fillHash` from stored intent data and verifies it matches. This binds all intent parameters - any tampering will cause hash mismatch.
 
 ### Repayment Address
 
@@ -301,6 +298,7 @@ The `repaymentAddress` field solves the cross-chain address mismatch problem:
 
 - Relayer fills on destination chain (e.g., Stellar with G... address)
 - Relayer specifies their source chain address (e.g., EVM 0x... address) as `repaymentAddress`
+- Messenger carries the `repaymentAddress` to source chain
 - Source chain's `notify()` pays to `repaymentAddress`, not derived from destination address
 
 ```solidity
@@ -332,9 +330,9 @@ function createIntent(
 ) external;
 
 function notify(
-    string calldata sourceChain,
-    string calldata sourceContract,
-    bytes calldata payload  // abi.encode(intentId, amountPaid, repaymentAddress, receiver, destinationToken)
+    uint8 messengerId,
+    uint256 sourceChainId,
+    bytes calldata messageData  // Messenger-specific data, adapter decodes to payload
 ) external;
 
 function refund(bytes32 intentId) external;
@@ -345,8 +343,9 @@ function refund(bytes32 intentId) external;
 ```solidity
 function fillAndNotify(
     IntentData calldata intentData,
-    bytes32 repaymentAddress     // Relayer's address on source chain for payout
-) external;
+    bytes32 repaymentAddress,    // Relayer's address on source chain for payout
+    uint8 messengerId            // 0=Rozo (default), 1=Axelar
+) external payable;
 ```
 
 #### fillAndNotify Parameters
@@ -355,14 +354,16 @@ function fillAndNotify(
 |-----------|------|-------------|
 | `intentData` | `IntentData` | Full intent data from source chain (see IntentData struct) |
 | `repaymentAddress` | `bytes32` | Relayer's address on source chain where payout should be sent |
+| `messengerId` | `uint8` | Messenger to use for notification (0=Rozo default, 1=Axelar) |
 
 #### fillAndNotify Logic
 
 ```solidity
 function fillAndNotify(
     IntentData calldata intentData,
-    bytes32 repaymentAddress
-) external onlyWhitelistedRelayer {
+    bytes32 repaymentAddress,
+    uint8 messengerId
+) external payable onlyWhitelistedRelayer {
     // 1. Verify we're on the correct destination chain
     require(intentData.destinationChainId == block.chainid, "WrongChain");
 
@@ -390,81 +391,90 @@ function fillAndNotify(
     // 7. Transfer tokens from relayer to receiver
     IERC20(token).safeTransferFrom(msg.sender, receiver, intentData.destinationAmount);
 
-    // 8. Build payload for source chain
+    // 8. Get messenger adapter
+    IMessengerAdapter adapter = messengerAdapters[messengerId];
+    require(address(adapter) != address(0), "InvalidMessenger");
+
+    // 9. Build minimal payload (intentId, fillHash, repaymentAddress)
     bytes memory payload = abi.encode(
         intentData.intentId,
-        intentData.destinationAmount,
-        repaymentAddress,                              // Relayer's source chain address
-        intentData.receiver,
-        intentData.destinationToken
+        fillHash,
+        repaymentAddress
     );
 
-    // 9. Call Axelar Gateway to send message to source chain
-    string memory sourceChain = chainIdToAxelarName[intentData.sourceChainId];
-    string memory sourceContract = trustedContracts[sourceChain];
+    // 10. Send message via selected messenger
+    adapter.sendMessage{value: msg.value}(intentData.sourceChainId, payload);
 
-    gateway.callContract(sourceChain, sourceContract, payload);
-
-    // 10. Emit event
+    // 11. Emit event
     emit FillAndNotifySent(
         intentData.intentId,
         msg.sender,
         repaymentAddress,
-        intentData.destinationAmount
+        fillHash,
+        messengerId
     );
 }
 ```
 
 #### Source Chain Verification (in `notify()`)
 
-Source chain's `notify()` receives the payload and verifies:
+Source chain's `notify()` receives the message and verifies via the messenger adapter:
 
 ```solidity
-function notify(..., bytes calldata payload) external onlyMessenger {
-    (bytes32 intentId, uint256 amountPaid, bytes32 repaymentAddress, bytes32 receiver, bytes32 destToken) =
-        abi.decode(payload, (bytes32, uint256, bytes32, bytes32, bytes32));
+function notify(
+    uint8 messengerId,
+    uint256 sourceChainId,
+    bytes calldata messageData
+) external {
+    // 1. Get and verify messenger adapter
+    IMessengerAdapter adapter = messengerAdapters[messengerId];
+    require(address(adapter) != address(0), "InvalidMessenger");
+    require(msg.sender == address(adapter), "NotMessenger");
+
+    // 2. Adapter verifies and decodes message
+    bytes memory payload = adapter.verifyMessage(sourceChainId, messageData);
+
+    // 3. Decode minimal payload
+    (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress) =
+        abi.decode(payload, (bytes32, bytes32, bytes32));
 
     Intent storage intent = intents[intentId];
 
-    // Status must be PENDING
+    // 4. Status must be PENDING
     require(intent.status == IntentStatus.PENDING, "InvalidStatus");
 
-    // Verify all parameters match the original intent
-    bool valid = true;
-    valid = valid && (intent.receiver == receiver);
-    valid = valid && (intent.destinationToken == destToken);
-    valid = valid && (amountPaid >= intent.destinationAmount);
+    // 5. Recompute expected fillHash from stored intent data
+    bytes32 expectedFillHash = _computeFillHash(intent, sourceChainId);
 
-    if (!valid) {
-        // Set to FAILED for admin investigation
+    // 6. Verify fillHash matches (binds all intent parameters)
+    if (fillHash != expectedFillHash) {
         intent.status = IntentStatus.FAILED;
-        emit IntentFailed(intentId, "Verification failed");
+        emit IntentFailed(intentId, "FillHashMismatch");
         return;
     }
 
-    // Mark as filled
+    // 7. Mark as filled
     intent.status = IntentStatus.FILLED;
 
-    // Record relayer address (for tracking/analytics)
+    // 8. Calculate protocol fee and payout
     address payoutAddress = address(uint160(uint256(repaymentAddress)));
-    intent.relayer = payoutAddress;
-
-    // Calculate protocol fee (protocolFee is in bps, e.g., 3 = 0.03%)
     uint256 feeAmount = intent.sourceAmount * protocolFee / 10000;
     uint256 payout = intent.sourceAmount - feeAmount;
 
-    // Transfer payout to relayer's repayment address
+    // 9. Transfer payout to relayer's repayment address
     IERC20(intent.sourceToken).transfer(payoutAddress, payout);
 
-    // Accumulate fee for admin withdrawal
+    // 10. Accumulate fee for admin withdrawal
     accumulatedFees[intent.sourceToken] += feeAmount;
 
-    emit IntentFilled(intentId, payoutAddress, amountPaid);
+    emit IntentFilled(intentId, payoutAddress, intent.destinationAmount);
 }
 ```
 
 **Key behaviors:**
 - Works for PENDING status only
+- Messenger adapter verifies message authenticity before decoding
+- Uses `fillHash` to verify all intent parameters match (no tampering possible)
 - Pays to `repaymentAddress` from payload (solves cross-chain address mismatch)
 - Relayer verification happens on destination chain (not source) via `intentData.relayer`
 - On mismatch: sets FAILED instead of reverting (allows admin recovery)
@@ -490,48 +500,48 @@ Relayer Workflow for fillAndNotify():
    ├── Verify intent is fillable (status = PENDING, not expired)
    ├── Verify you are the assigned relayer (if intentData.relayer != 0)
    ├── Verify not already filled on destination (check filledIntents)
-   └── Calculate if fill is profitable
+   ├── Calculate if fill is profitable
+   └── Choose messenger (0=Rozo for speed, 1=Axelar for decentralization)
 
 2. APPROVE (if not already done)
    └── token.approve(RozoIntentsDestination, amount)
 
 3. CALL fillAndNotify()
-   ├── Input: intentData, repaymentAddress (your source chain address)
+   ├── Input: intentData, repaymentAddress, messengerId
    ├── Contract verifies you are assigned relayer (if applicable)
    ├── Contract verifies fill hash uniqueness
    ├── Contract transfers: relayer → receiver
-   └── Contract sends Axelar message to source chain
+   └── Contract sends message via selected messenger adapter
 
-4. WAIT FOR AXELAR (~5-10 seconds)
-   └── Axelar validators verify and relay message
+4. WAIT FOR MESSENGER
+   ├── Rozo: ~1-3 seconds (Rozo relayer network)
+   └── Axelar: ~5-10 seconds (75+ validators verify)
 
 5. RECEIVE PAYMENT (automatic)
    └── notify() on source chain pays to repaymentAddress
 ```
 
-#### Axelar Payload Format
+#### Messenger Payload Format
 
-The payload sent via Axelar Gateway:
+The minimal payload sent via messenger adapter (same format for all messengers):
 
 ```solidity
-// Encoding (5 parameters)
+// Encoding (3 parameters - minimal for security)
 bytes memory payload = abi.encode(
     intentId,           // bytes32 - which intent
-    amount,             // uint256 - amount paid to receiver
-    repaymentAddress,   // bytes32 - relayer's source chain address for payout
-    receiver,           // bytes32 - who received payment (for verification)
-    destinationToken    // bytes32 - token used (for verification)
+    fillHash,           // bytes32 - hash of all intent parameters (verified on source)
+    repaymentAddress    // bytes32 - relayer's source chain address for payout
 );
 
 // Decoding on source chain
 (
     bytes32 intentId,
-    uint256 amountPaid,
-    bytes32 repaymentAddress,
-    bytes32 receiver,
-    bytes32 destinationToken
-) = abi.decode(payload, (bytes32, uint256, bytes32, bytes32, bytes32));
+    bytes32 fillHash,
+    bytes32 repaymentAddress
+) = abi.decode(payload, (bytes32, bytes32, bytes32));
 ```
+
+**Security:** The `fillHash` binds all intent parameters. Source chain recomputes the expected hash from stored intent data and verifies it matches.
 
 #### Gas Payment
 
@@ -539,11 +549,11 @@ bytes memory payload = abi.encode(
 |--------|----------|-------|
 | `fillAndNotify()` call | Relayer | Destination |
 | Token transfer | Relayer (via contract) | Destination |
-| Axelar message fee | Relayer (included in call) | Destination |
-| `notify()` execution | Axelar (prepaid) | Source |
+| Messenger fee | Relayer (via msg.value) | Destination |
+| `notify()` execution | Messenger network | Source |
 | Relayer payout transfer | Contract | Source |
 
-**Note:** Axelar message fees are paid in native token on destination chain. Fee amount depends on destination chain gas prices.
+**Note:** Messenger fees are paid in native token on destination chain via `msg.value`. Fee varies by messenger and destination chain gas prices.
 
 #### Failure Handling
 
@@ -551,8 +561,9 @@ bytes memory payload = abi.encode(
 |---------------|--------|----------|
 | Not assigned relayer | Transaction reverts "NotAssignedRelayer" | Only assigned relayer can fill |
 | Already filled (fillHash exists) | Transaction reverts "AlreadyFilled" | None needed - already filled |
+| Invalid messenger ID | Transaction reverts "InvalidMessenger" | Use valid messengerId (0 or 1) |
 | Token transfer fails | Transaction reverts | Relayer retries or abandons |
-| Axelar message fails | Rare - Axelar handles | Check Axelar explorer |
+| Messenger fails to deliver | Intent stays PENDING | See [Messenger Failure + Refund Race](./MESSENGER_DESIGN.md#concern-messenger-failure--refund-race) |
 | `notify()` verification fails | Status = FAILED | Admin investigates |
 
 #### fillAndNotify Events
@@ -562,7 +573,8 @@ event FillAndNotifySent(
     bytes32 indexed intentId,
     address indexed relayer,         // Who called fillAndNotify (destination address)
     bytes32 repaymentAddress,        // Where payout goes (source chain address)
-    uint256 amount
+    bytes32 fillHash,                // Hash binding all intent parameters
+    uint8 messengerId                // Which messenger was used (0=Rozo, 1=Axelar)
 );
 ```
 
@@ -576,7 +588,7 @@ error IntentExpired();
 error AlreadyFilled();
 error InvalidAmount();
 error TransferFailed();
-error UnsupportedSourceChain();
+error InvalidMessenger();
 ```
 
 ---
@@ -675,10 +687,7 @@ function removeRelayer(address relayer) external onlyOwner;
 
 // ============ Cross-Chain Configuration ============
 function setTrustedContract(string calldata chainName, string calldata contractAddress) external onlyOwner;
-function setMessenger(address messenger, bool allowed) external onlyOwner;
-
-// Chain ID to Axelar name mapping (REQUIRED for cross-chain routing)
-function setChainIdToAxelarName(uint256 chainId, string calldata axelarName) external onlyOwner;
+function setMessengerAdapter(IMessengerAdapter adapter) external onlyOwner;  // Auto-registers by messengerId
 
 // ============ Intent Recovery (for FAILED status) ============
 function setIntentStatus(bytes32 intentId, IntentStatus status) external onlyOwner;
@@ -690,9 +699,8 @@ function adminRefund(bytes32 intentId) external onlyOwner;
 
 | Function | Purpose | Example |
 |----------|---------|---------|
-| `setChainIdToAxelarName` | Maps chain IDs to Axelar names for message routing | `setChainIdToAxelarName(1500, "stellar")` |
+| `setMessengerAdapter` | Registers messenger adapters (auto-assigns by ID) | `setMessengerAdapter(rozoAdapter)` |
 | `setTrustedContract` | Whitelists remote contracts | `setTrustedContract("stellar", "C...")` |
-| `setMessenger` | Allows Axelar Gateway to call `notify()` | `setMessenger(axelarGateway, true)` |
 | `addRelayer` | Whitelists relayer addresses | `addRelayer(0x...)` |
 
 ### Admin Recovery Scenarios
@@ -775,6 +783,8 @@ error IntentNotExpired();
 error NotRelayer();
 error NotAssignedRelayer();
 error NotMessenger();
+error InvalidMessenger();
+error FillHashMismatch();
 error InsufficientAmount(uint256 paid, uint256 required);
 error TransferFailed();
 error InvalidFee();
@@ -794,7 +804,9 @@ error AlreadyFilled();
 | `IntentNotExpired` | `refund()` before deadline | Wait until `block.timestamp >= deadline` |
 | `NotRelayer` | Non-whitelisted address calls relayer function | Check `relayers[address]` mapping |
 | `NotAssignedRelayer` | Wrong relayer tries to fill assigned intent | Only assigned relayer can fill; check `intentData.relayer` |
-| `NotMessenger` | Non-messenger calls `notify()` | Only Axelar Gateway can call |
+| `NotMessenger` | Non-messenger adapter calls `notify()` | Only registered messenger adapters can call |
+| `InvalidMessenger` | Invalid messengerId in `fillAndNotify()` | Use valid messengerId (0=Rozo, 1=Axelar) |
+| `FillHashMismatch` | Fill hash doesn't match expected | Intent parameters were tampered; admin investigates |
 | `InsufficientAmount` | `amountPaid < destinationAmount` | Relayer must pay at least destinationAmount |
 | `TransferFailed` | Token transfer reverts | Check token balance, allowance, or token contract |
 | `InvalidFee` | `setProtocolFee()` with fee > 30 bps | Fee must be <= 30 (0.3%) |
@@ -811,12 +823,12 @@ error AlreadyFilled();
 
 2. **Intent stuck in PENDING**
    - Check if `fillAndNotify()` was called on destination
-   - Check Axelar explorer for message status
-   - Wait for Axelar confirmation (~5-10 sec)
+   - Check messenger status (Rozo dashboard or Axelar explorer)
+   - Wait for messenger confirmation (Rozo: ~1-3 sec, Axelar: ~5-10 sec)
 
 3. **Intent marked FAILED**
    - Check event logs for `IntentFailed` reason
-   - Compare payload data with original intent
+   - If "FillHashMismatch": intent parameters may have been tampered
    - Contact admin for recovery
 
 4. **"AlreadyFilled" error on destination**
@@ -828,6 +840,11 @@ error AlreadyFilled();
    - Intent has a specific relayer assigned via RFQ
    - Only that relayer can fill this intent
    - Check `intentData.relayer` field
+
+6. **"InvalidMessenger" error**
+   - Invalid messengerId provided to `fillAndNotify()`
+   - Use 0 for Rozo (default) or 1 for Axelar
+   - Check `messengerAdapters[id]` is registered
 
 ---
 

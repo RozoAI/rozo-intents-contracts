@@ -61,7 +61,9 @@ Other stablecoins (USDT, etc.) may be added. Exotic tokens technically work but:
 | **Sender** | User who initiates payment |
 | **Receiver** | Recipient on destination chain |
 | **Relayer** | Service that pays on destination, gets repaid on source (aka Solver/Filler) |
-| **Messenger** | Cross-chain verification (Axelar) |
+| **Messenger** | Cross-chain verification service. Multiple options: Rozo (default, ~1-3 sec) or Axelar (~5-10 sec) |
+| **Messenger Adapter** | Contract implementing `IMessengerAdapter` interface to support different messengers |
+| **messengerId** | Identifier for messenger selection: 0=Rozo (default), 1=Axelar |
 
 ## Amount Terms
 
@@ -88,14 +90,14 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | Function | Caller | Description |
 |----------|--------|-------------|
 | `createIntent()` | Sender | Deposit funds, optionally assign relayer from RFQ |
-| `notify()` | Messenger only | Confirm fast fill → FILLED, pay relayer |
+| `notify()` | Messenger adapter only | Confirm fast fill → FILLED, pay relayer |
 | `refund()` | Sender or refundAddress | Refund expired intent |
 
 ### Destination Chain
 
 | Function | Caller | Description |
 |----------|--------|-------------|
-| `fillAndNotify()` | Relayer | Pay receiver, specify repayment address, send Axelar message |
+| `fillAndNotify()` | Relayer | Pay receiver, specify repayment address and messengerId, send notification via selected messenger |
 
 ## Fill Modes
 
@@ -123,7 +125,8 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 |------|-------------|
 | **filledIntents** | Mapping on destination chain tracking filled intents (prevents double-fill) |
 | **Relayer Whitelist** | Admin-managed list of allowed relayers |
-| **Trusted Contracts** | Cross-chain contract addresses verified for Axelar messages |
+| **Trusted Contracts** | Cross-chain contract addresses verified for messenger messages |
 | **Repayment Address** | Relayer's address on source chain where payout is sent |
 | **IntentData** | Struct containing all intent parameters, passed to destination chain |
-| **Fill Hash** | Hash of IntentData used to track fills on destination chain |
+| **Fill Hash** | Hash of IntentData used to track fills and verify integrity on source chain |
+| **IMessengerAdapter** | Interface for messenger adapters (`sendMessage`, `verifyMessage`, `messengerId`) |

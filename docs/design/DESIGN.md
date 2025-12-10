@@ -2,7 +2,7 @@
 
 Intent-based cross-chain payments. Base ↔ Stellar (bidirectional).
 
-**No custom validators.** Axelar messenger handles verification.
+**Multiple messenger options.** Rozo messenger (default, ~1-3 sec) or Axelar (~5-10 sec). Relayers choose which messenger to use for their repayment. Users receive funds instantly regardless of messenger choice.
 
 ---
 
@@ -97,16 +97,16 @@ createIntent(sourceAmount, destinationAmount, ...)
 
 | Function | Caller | Description |
 |----------|--------|-------------|
-| `fillAndNotify()` | Relayer | Transfer to receiver + send Axelar message. Includes `repaymentAddress` for cross-chain payout. |
+| `fillAndNotify()` | Relayer | Transfer to receiver + send messenger notification. Includes `repaymentAddress` for cross-chain payout and `messengerId` for messenger selection (0=Rozo default, 1=Axelar). |
 
 ---
 
 ## Flow
 
-### Fast Fill (via Relayer + Axelar)
+### Fast Fill (via Relayer + Messenger)
 
 ```
-Source Chain                 Destination Chain              Axelar
+Source Chain                 Destination Chain              Messenger Network
      │                              │                          │
 1. RFQ Auction (off-chain)          │                          │
    relayer assigned                 │                          │
@@ -114,18 +114,22 @@ Source Chain                 Destination Chain              Axelar
 2. createIntent(relayer)            │                          │
    status = PENDING                 │                          │
      │                              │                          │
-     │                       3. fillAndNotify(intentData, repaymentAddress)
+     │                       3. fillAndNotify(intentData, repaymentAddress, messengerId)
      │                          verify: not already filled     │
      │                          transfer: relayer → receiver   │
-     │                          call Axelar Gateway ──────────►│
+     │                          call messenger adapter ───────►│
      │                              │                          │
-     │                              │              4. Validators verify
+     │                              │              4. Messenger verifies
+     │                              │                 (Rozo: ~1-3 sec)
+     │                              │                 (Axelar: ~5-10 sec)
      │                              │                          │
      │◄─────────────────────────────────────────── 5. notify()
      │                              │                          │
 6. status = FILLED                  │                          │
    pay relayer (repaymentAddress)   │                          │
 ```
+
+**Messenger Selection:** Relayers choose `messengerId` (0=Rozo default, 1=Axelar). Users receive funds instantly regardless of choice.
 
 ### RFQ (Request for Quote) System
 
@@ -183,9 +187,9 @@ Relayers specify a `repaymentAddress` in `fillAndNotify()` to receive payment on
 ```
 Relayer fills on Stellar (G... address)
     ↓
-fillAndNotify(intentData, repaymentAddress: 0x1234...)
+fillAndNotify(intentData, repaymentAddress: 0x1234..., messengerId: 0)
     ↓
-Axelar message includes repaymentAddress
+Messenger (Rozo or Axelar) carries repaymentAddress
     ↓
 notify() on Base pays 0x1234... (relayer's EVM address)
 ```
@@ -197,6 +201,7 @@ notify() on Base pays 0x1234... (relayer's EVM address)
 | Intent already filled on destination | Transaction reverts with "AlreadyFilled" |
 | `fillAndNotify()` succeeds but `notify()` fails verification | Intent set to FAILED, admin investigates |
 | Relayer never fills | Intent stays PENDING until deadline, then sender refunds |
+| Messenger fails to deliver before deadline | See [Messenger Failure + Refund Race](./MESSENGER_DESIGN.md#concern-messenger-failure--refund-race) |
 
 ---
 
@@ -230,7 +235,7 @@ adminRefund(bytes32 intentId)
 ### Cross-Chain Configuration
 ```solidity
 setTrustedContract(string chainName, string contractAddress)
-setMessenger(address messenger, bool allowed)
+setMessengerAdapter(IMessengerAdapter adapter)  // Auto-registers by messengerId from adapter
 ```
 
 ---
@@ -280,8 +285,9 @@ If contract changes are needed:
 | Intent state, funds | On-chain |
 | RFQ auction | Off-chain (WebSocket server) |
 | Relayer monitoring | Off-chain indexer |
-| Fill verification | Axelar (75+ validators) |
+| Fill verification | Messenger network (Rozo ~1-3 sec, Axelar ~5-10 sec) |
 | Fill tracking (destination) | On-chain (filledIntents mapping) |
+| Messenger selection | Relayer choice (messengerId parameter) |
 
 ---
 
