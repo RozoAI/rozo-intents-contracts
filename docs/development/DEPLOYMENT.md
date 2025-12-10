@@ -191,37 +191,6 @@ Stellar Contract:
 
 ---
 
-## SlowFill Bridge Configuration (EVM only)
-
-### 1. Deploy Bridge Adapter
-
-```bash
-forge create src/adapters/CCTPAdapter.sol:CCTPAdapter \
-  --constructor-args $CCTP_TOKEN_MESSENGER_ADDRESS
-```
-
-### 2. Configure Routes
-
-```solidity
-// Enable Base → Arbitrum USDC route
-rozoIntents.setSlowFillBridge(
-    42161,                              // Arbitrum chain ID
-    BASE_USDC_ADDRESS,                  // source token
-    bytes32(uint256(uint160(ARB_USDC))), // destination token
-    CCTP_ADAPTER_ADDRESS                // bridge adapter
-);
-```
-
-### CCTP Token Messenger Addresses
-
-| Chain | Token Messenger |
-|-------|-----------------|
-| Base | `0x1682Ae6375C4E4A97e4B583BC394c861A46D8962` |
-| Arbitrum | `0x19330d10D9Cc8751218eaf51E8885D058642E08A` |
-| Ethereum | `0xBd3fa81B58Ba92a82136038B25aDec7066af3155` |
-
----
-
 ## Verification
 
 ### Verify Deployment
@@ -257,7 +226,6 @@ cast call $CONTRACT_ADDRESS "trustedContracts(string)(string)" "stellar"
 - [ ] **Chain ID to Axelar name mapping configured** (`setChainIdToAxelarName`)
 - [ ] Trusted contracts configured for all supported chains
 - [ ] Relayers whitelisted on both source and destination chains
-- [ ] SlowFill bridges configured (if applicable)
 - [ ] Test transaction completed successfully
 
 ---

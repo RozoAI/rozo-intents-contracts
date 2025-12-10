@@ -42,36 +42,6 @@ PENDING                 │                   │                        │    
 - Axelar verifies the event and triggers `notify()` on source chain
 - Payment goes to `repaymentAddress` (solves cross-chain address mismatch)
 
-## Slow Fill Flow
-
-```
-Sender                     Relayer/Bot                 CCTP
-  │                          │                           │
-  │ createIntent()           │                           │
-  │ (deposit funds)          │                           │
-  ▼                          │                           │
-PENDING                      │                           │
-  │                          │                           │
-  │                    slowFill()                        │
-  │                    (triggers bridge)                 │
-  │                          │                           │
-  │                    deduct fees                       │
-  │                          │                           │
-  │                    CCTP burn ────────────────────────►
-  │                          │                           │
-  ▼                          ▼                           │
-FILLED                    (done)                         │
-  │                                                      │
-  │                                        ~1-60 min later
-  │                                                      │
-  │                                              CCTP mint
-  │                                                      │
-  │                                              receiver
-  │                                              gets funds
-```
-
-**Key difference:** SlowFill goes directly from PENDING → FILLED. No intermediate state.
-
 ## Fund Locations
 
 ```
@@ -136,21 +106,7 @@ Protocol fee can be taken from the spread. Configured via admin:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Slow Fill Formula
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  sourceAmount = destinationAmount + protocolFee                 │
-│                                                                 │
-│  Where:                                                         │
-│  - sourceAmount:      What sender deposits                      │
-│  - destinationAmount: What receiver gets (bridged via CCTP)     │
-│  - protocolFee:       sourceAmount - destinationAmount          │
-│  - No relayer spread (SlowFill is a service, not arbitrage)     │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Relayer Payout Formula (Fast Fill)
+### Relayer Payout Formula
 
 ```
 relayerPayout = sourceAmount - protocolFee

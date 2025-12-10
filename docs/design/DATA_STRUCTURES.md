@@ -25,11 +25,6 @@ contract RozoIntents {
     // Chain ID to Axelar chain name mapping (REQUIRED for fillAndNotify routing)
     mapping(uint256 => string) public chainIdToAxelarName;  // e.g., 8453 => "base", 1500 => "stellar"
 
-    // ============ SlowFill Configuration (EVM only) ============
-    // SlowFill bridge adapters per route
-    // key = keccak256(abi.encodePacked(destinationChainId, sourceToken, destinationToken))
-    mapping(bytes32 => address) public slowFillBridges;
-
     // ============ Fee Configuration ============
     // Protocol fee in basis points (max 30 bps = 0.3%)
     uint256 public protocolFee;  // e.g., 3 = 0.03%
@@ -176,9 +171,9 @@ This ensures:
 
 - **`intentId`**: Must be unique. Frontend generates as `keccak256(abi.encodePacked(uuid))` or similar.
 - **`bytes32` addresses**: Cross-chain addresses use `bytes32` for compatibility. EVM addresses are left-padded with zeros.
-- **`destinationAmount`**: Frontend calculates based on fees. For Fast Fill: relayer fills if spread is profitable. For Slow Fill: `sourceAmount - destinationAmount` goes to protocol.
+- **`destinationAmount`**: Frontend calculates based on fees. Relayer fills if spread is profitable.
 - **`deadline`**: Recommended: 30 minutes to 24 hours from creation. Too short = no relayer fills. Too long = funds locked.
-- **`refundAddress`**: If not provided, defaults to `sender`. Used for both RozoIntents refund and CCTP refund (SlowFill).
+- **`refundAddress`**: If not provided, defaults to `sender`.
 - **`relayer`**: From RFQ auction. If `address(0)`, any whitelisted relayer can fill (open intent). Destination chain verifies `msg.sender` matches this field.
 
 ---
@@ -188,7 +183,7 @@ This ensures:
 ```solidity
 enum IntentStatus {
     PENDING,  // 0 - Created, waiting for fill
-    FILLED,   // 1 - Completed (via notify or slowFill)
+    FILLED,   // 1 - Completed (via notify)
     FAILED,   // 2 - Fill verification failed (admin must investigate)
     REFUNDED  // 3 - Sender refunded after deadline
 }
@@ -210,19 +205,17 @@ Admin must investigate and recover using admin functions.
 ```
 createIntent() ──► PENDING
                      │
-         ┌───────────┼───────────┐
-         │           │           │
-     slowFill()   refund()    notify()
-         │        (deadline)     │
-         │           │           │
-         │           │       ┌───┴───┐
-         │           │       │       │
-         ▼           ▼       ▼       ▼
-      FILLED     REFUNDED  FILLED  FAILED
+         ┌───────────┴───────────┐
+         │                       │
+      refund()                notify()
+      (deadline)                 │
+         │                   ┌───┴───┐
+         │                   │       │
+         ▼                   ▼       ▼
+      REFUNDED            FILLED  FAILED
 ```
 
 **Key points:**
-- SlowFill: PENDING → FILLED directly
 - Refund allowed from PENDING after deadline
 - `notify()` sets FAILED if payload doesn't match intent
 - No FILLING state - relayer assignment happens via RFQ before createIntent
@@ -269,15 +262,11 @@ Stellar addresses (G... public keys) are 32 bytes natively. Use as-is.
 - **Too long (> 24 hours)**: User funds locked unnecessarily if no relayer fills.
 - **Near deadline**:
   - `fillAndNotify()` will revert if intent expired on destination
-  - `slowFill()` will revert if `block.timestamp >= deadline`
   - `refund()` only allowed after `block.timestamp >= deadline`
 
 ### Deadline Validation
 
 ```solidity
-// In slowFill()
-require(block.timestamp < intent.deadline, "Intent expired");
-
 // In refund()
 require(block.timestamp >= intent.deadline, "Not expired yet");
 
@@ -347,8 +336,6 @@ function notify(
     string calldata sourceContract,
     bytes calldata payload  // abi.encode(intentId, amountPaid, repaymentAddress, receiver, destinationToken)
 ) external;
-
-function slowFill(bytes32 intentId) external;  // EVM only
 
 function refund(bytes32 intentId) external;
 ```
@@ -693,20 +680,6 @@ function setMessenger(address messenger, bool allowed) external onlyOwner;
 // Chain ID to Axelar name mapping (REQUIRED for cross-chain routing)
 function setChainIdToAxelarName(uint256 chainId, string calldata axelarName) external onlyOwner;
 
-// ============ SlowFill Bridge Configuration (EVM only) ============
-function setSlowFillBridge(
-    uint256 destinationChainId,
-    address sourceToken,
-    bytes32 destinationToken,
-    address bridgeAdapter
-) external onlyOwner;
-
-function removeSlowFillBridge(
-    uint256 destinationChainId,
-    address sourceToken,
-    bytes32 destinationToken
-) external onlyOwner;
-
 // ============ Intent Recovery (for FAILED status) ============
 function setIntentStatus(bytes32 intentId, IntentStatus status) external onlyOwner;
 function setIntentRelayer(bytes32 intentId, address relayer) external onlyOwner;
@@ -721,7 +694,6 @@ function adminRefund(bytes32 intentId) external onlyOwner;
 | `setTrustedContract` | Whitelists remote contracts | `setTrustedContract("stellar", "C...")` |
 | `setMessenger` | Allows Axelar Gateway to call `notify()` | `setMessenger(axelarGateway, true)` |
 | `addRelayer` | Whitelists relayer addresses | `addRelayer(0x...)` |
-| `setSlowFillBridge` | Enables SlowFill routes (EVM only) | `setSlowFillBridge(42161, USDC, USDC_bytes32, adapter)` |
 
 ### Admin Recovery Scenarios
 
@@ -766,12 +738,6 @@ event IntentRefunded(
     uint256 amount
 );
 
-event SlowFillTriggered(
-    bytes32 indexed intentId,
-    bytes32 bridgeMessageId,
-    address indexed caller
-);
-
 // Destination chain events
 event FillAndNotifySent(
     bytes32 indexed intentId,
@@ -810,7 +776,6 @@ error NotRelayer();
 error NotAssignedRelayer();
 error NotMessenger();
 error InsufficientAmount(uint256 paid, uint256 required);
-error SlowFillUnsupported();
 error TransferFailed();
 error InvalidFee();
 error UntrustedSource();
@@ -825,13 +790,12 @@ error AlreadyFilled();
 | `IntentAlreadyExists` | `createIntent()` with duplicate intentId | Generate new unique intentId |
 | `IntentNotFound` | Any function with non-existent intentId | Check intentId is correct, check correct chain |
 | `InvalidStatus` | Function called on wrong status | Check current status via `intents[id].status` |
-| `IntentExpired` | `fillAndNotify()` or `slowFill()` after deadline | Intent can only be refunded now |
+| `IntentExpired` | `fillAndNotify()` after deadline | Intent can only be refunded now |
 | `IntentNotExpired` | `refund()` before deadline | Wait until `block.timestamp >= deadline` |
 | `NotRelayer` | Non-whitelisted address calls relayer function | Check `relayers[address]` mapping |
 | `NotAssignedRelayer` | Wrong relayer tries to fill assigned intent | Only assigned relayer can fill; check `intentData.relayer` |
 | `NotMessenger` | Non-messenger calls `notify()` | Only Axelar Gateway can call |
 | `InsufficientAmount` | `amountPaid < destinationAmount` | Relayer must pay at least destinationAmount |
-| `SlowFillUnsupported` | SlowFill on unsupported route | Check `slowFillBridges` mapping for route |
 | `TransferFailed` | Token transfer reverts | Check token balance, allowance, or token contract |
 | `InvalidFee` | `setProtocolFee()` with fee > 30 bps | Fee must be <= 30 (0.3%) |
 | `UntrustedSource` | `notify()` from untrusted contract | Check `trustedContracts[chainName]` |
@@ -873,7 +837,6 @@ error AlreadyFilled();
 - [DESIGN.md](./DESIGN.md) - Architecture overview
 - [GLOSSARY.md](./GLOSSARY.md) - Terms and definitions
 - [FUND_FLOW.md](./FUND_FLOW.md) - Fund movement
-- [SLOWFILLED.md](./SLOWFILLED.md) - SlowFill details
 - [STELLAR.md](./STELLAR.md) - Stellar address/token encoding
 
 ### Development

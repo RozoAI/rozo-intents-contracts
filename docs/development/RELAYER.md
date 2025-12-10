@@ -153,18 +153,6 @@ User                    RFQ Server              Relayers            Source Chain
 - Contract verifies `msg.sender` matches `intentData.relayer` (if assigned intent)
 - `repaymentAddress` specifies where to receive payout on source chain
 
-## Slow Fill Flow (EVM ↔ EVM only)
-
-**Note:** SlowFill only works for EVM ↔ EVM routes (CCTP). Base ↔ Stellar uses Fast Fill only.
-
-```
-Example: Base → Arbitrum
-1. Sender creates intent on Base (funds locked, status = PENDING)
-2. Relayer/bot calls slowFill() on RozoIntentsBase
-3. Contract deducts fee, calls CCTP burn → status = FILLED
-4. CCTP mints directly to receiver on Arbitrum
-```
-
 ## Functions
 
 ### Source Chain
@@ -172,7 +160,6 @@ Example: Base → Arbitrum
 | Function | Caller | Result |
 |----------|--------|--------|
 | `createIntent()` | Sender | → PENDING (with optional relayer assignment) |
-| `slowFill()` | Relayer | PENDING → FILLED (bridge path, no relayer profit) |
 | `notify()` | Messenger | PENDING → FILLED (relayer paid to repaymentAddress) |
 | `refund()` | Sender/refundAddress | PENDING → REFUNDED (after deadline) |
 

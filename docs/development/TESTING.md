@@ -197,30 +197,6 @@ function test_notify_revert_notMessenger() public {
 }
 ```
 
-### slowFill Tests
-
-```solidity
-function test_slowFill_success() public {
-    bytes32 intentId = _createTestIntent();
-
-    vm.prank(relayer);
-    rozoIntents.slowFill(intentId);
-
-    // Verify
-    (,, IntentStatus status,,) = rozoIntents.intents(intentId);
-    assertEq(uint(status), uint(IntentStatus.FILLED));
-}
-
-function test_slowFill_revert_unsupportedRoute() public {
-    // Create intent to unsupported chain
-    bytes32 intentId = _createTestIntentTo("stellar"); // CCTP doesn't support Stellar
-
-    vm.prank(relayer);
-    vm.expectRevert(SlowFillUnsupported.selector);
-    rozoIntents.slowFill(intentId);
-}
-```
-
 ### refund Tests
 
 ```solidity
@@ -470,7 +446,6 @@ cargo test -- --nocapture
 | createIntent | 100% |
 | fill | 100% |
 | notify | 100% |
-| slowFill | 100% |
 | refund | 100% |
 | Admin functions | 90% |
 

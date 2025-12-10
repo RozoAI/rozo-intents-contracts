@@ -30,7 +30,7 @@ Example: `keccak256(abi.encodePacked(uuid))`
 
 ### Timing Rules
 
-- `fillAndNotify()` / `slowFill()` → require `block.timestamp < deadline`
+- `fillAndNotify()` → require `block.timestamp < deadline`
 - `refund()` → require `block.timestamp >= deadline`
 - Near deadline: relayers may skip intent to avoid race with expiry
 
@@ -41,7 +41,7 @@ Example: `keccak256(abi.encodePacked(uuid))`
 | Status | Description |
 |--------|-------------|
 | PENDING | Sender deposited, waiting for fill |
-| FILLED | Fill completed (via `notify()` or `slowFill()`) |
+| FILLED | Fill completed (via `notify()`) |
 | FAILED | Fill verification failed (mismatch in receiver, token, or amount) |
 | REFUNDED | Sender refunded after deadline |
 
@@ -91,7 +91,6 @@ createIntent(sourceAmount, destinationAmount, ...)
 |----------|--------|-------------|
 | `createIntent()` | Sender | Deposit sourceAmount, lock funds. Optionally assign relayer from RFQ. |
 | `notify()` | Messenger only | Confirm fill → FILLED, pay relayer |
-| `slowFill()` | Relayer/Bot | Bridge via CCTP → FILLED directly (EVM only) |
 | `refund()` | Sender or refundAddress | Refund after deadline → REFUNDED |
 
 ### Destination Chain (where receiver gets paid)
@@ -199,26 +198,6 @@ notify() on Base pays 0x1234... (relayer's EVM address)
 | `fillAndNotify()` succeeds but `notify()` fails verification | Intent set to FAILED, admin investigates |
 | Relayer never fills | Intent stays PENDING until deadline, then sender refunds |
 
-### Slow Fill (via CCTP Bridge, EVM only)
-
-```
-Source Chain (EVM)           CCTP                    Destination (EVM)
-     │                          │                          │
-1. createIntent()               │                          │
-   status = PENDING             │                          │
-     │                          │                          │
-2. slowFill()                   │                          │
-   deduct fee                   │                          │
-   call bridge adapter ────────►│                          │
-     │                          │                          │
-3. status = FILLED              │                          │
-     │                          │                          │
-     │                    ~1-60 min                        │
-     │                          │                          │
-     │                    CCTP mint ──────────────────────►│
-     │                          │                   receiver gets funds
-```
-
 ---
 
 ## Admin Functions
@@ -253,23 +232,6 @@ adminRefund(bytes32 intentId)
 setTrustedContract(string chainName, string contractAddress)
 setMessenger(address messenger, bool allowed)
 ```
-
----
-
-## Fast vs Slow Fill
-
-| Mode | Function | Speed | Status Flow | Relayer Profit |
-|------|----------|-------|-------------|----------------|
-| Fast | `fillAndNotify()` + `notify()` | ~5-10 sec | PENDING → FILLED | Yes (spread) |
-| Slow | `slowFill()` | ~1-60 min | PENDING → FILLED | No (service only) |
-
-**Fast Fill:** Relayer pays on destination, gets repaid on source (earns spread).
-
-**Slow Fill:** CCTP bridges funds directly to receiver. Fee deducted before burn. No relayer profit - it's a fallback service. Bypasses RozoIntents on destination chain entirely.
-
-**⚠️ SlowFill Warning:** Once `slowFill()` succeeds (CCTP burn completes), **no refund is possible via RozoIntents**. If CCTP mint stalls, user must claim refund directly from CCTP using their `refundAddress`.
-
-See [SLOWFILLED.md](./SLOWFILLED.md) for full details.
 
 ---
 
@@ -377,17 +339,6 @@ let bytes32_addr: BytesN<32> = stellar_addr.to_bytes();
 let addr: Address = Address::from_bytes(&bytes32_addr);
 ```
 
-### Fill Mode Support
-
-| Route | Fast Fill | Slow Fill |
-|-------|-----------|-----------|
-| Base ↔ Stellar | Yes | No (CCTP doesn't support Stellar yet) |
-| EVM ↔ EVM | Yes | Yes (via CCTP) |
-
-**Fast Fill:** Works on all routes via Axelar messaging.
-
-**Slow Fill:** Only EVM ↔ EVM routes where CCTP is supported. Bypasses destination contract - funds go directly to receiver.
-
 ---
 
 ## See Also
@@ -396,7 +347,6 @@ let addr: Address = Address::from_bytes(&bytes32_addr);
 - [FUND_FLOW.md](./FUND_FLOW.md) - Fund movement & fees
 - [GLOSSARY.md](./GLOSSARY.md) - Terms and supported chains
 - [MESSENGER_DESIGN.md](./MESSENGER_DESIGN.md) - Messenger interface & Axelar
-- [SLOWFILLED.md](./SLOWFILLED.md) - SlowFill bridge fallback details
 - [DATA_STRUCTURES.md](./DATA_STRUCTURES.md) - Intent struct, events, errors
 
 ### Development

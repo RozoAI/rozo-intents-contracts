@@ -77,7 +77,7 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | Status | Description |
 |--------|-------------|
 | **PENDING** | Sender deposited, waiting for fill |
-| **FILLED** | Fill completed (via `notify()` or `slowFill()`) |
+| **FILLED** | Fill completed (via `notify()`) |
 | **FAILED** | Fill verification failed, admin must investigate |
 | **REFUNDED** | Sender refunded |
 
@@ -88,7 +88,6 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | Function | Caller | Description |
 |----------|--------|-------------|
 | `createIntent()` | Sender | Deposit funds, optionally assign relayer from RFQ |
-| `slowFill()` | Relayer | Bridge via CCTP → FILLED directly |
 | `notify()` | Messenger only | Confirm fast fill → FILLED, pay relayer |
 | `refund()` | Sender or refundAddress | Refund expired intent |
 
@@ -103,7 +102,6 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | Mode | Status Flow | Relayer Profit |
 |------|-------------|----------------|
 | **Fast Fill** | PENDING → FILLED | Yes (spread) |
-| **Slow Fill** | PENDING → FILLED | No (service only) |
 
 ## RFQ Terms
 
