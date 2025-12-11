@@ -474,7 +474,7 @@ contract RozoIntentsSource {
 
 ### Payload Security
 
-1. **Minimal Payload**: Only `intentId`, `fillHash`, and `repaymentAddress` cross the messenger
+1. **Minimal Payload**: Only `intentId`, `fillHash`, `repaymentAddress`, and `relayer` cross the messenger.
 2. **Hash Verification**: Source chain recomputes `fillHash` from stored intent data and verifies match
 3. **No Manipulation**: `fillHash` binds all intent parameters - any tampering will cause hash mismatch
 4. **Messenger ID 0 = Default**: No need for explicit default setter - ID 0 (Rozo) is implicit default

@@ -216,6 +216,7 @@ withdrawFees(token)       // feeRecipient withdraws accumulated fees
 
 ### Relayer Management
 ```solidity
+enum RelayerType { NONE, ROZO, EXTERNAL }
 addRelayer(address relayer, RelayerType relayerType)
 removeRelayer(address relayer)
 ```

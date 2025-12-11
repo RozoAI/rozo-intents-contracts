@@ -38,7 +38,7 @@ PENDING                 │                   │                        │    
 **Key points:**
 - RFQ auction determines relayer before intent creation
 - Relayer calls `fillAndNotify()` on destination contract with `IntentData`, `repaymentAddress`, and `messengerId`
-- Contract verifies relayer assignment (if not open intent)
+- Contract verifies relayer assignment (if not open intent) or ROZO fallback
 - Contract tracks fill via `filledIntents` mapping to prevent double-fills
 - Messenger verifies the event and triggers `notify()` on source chain (Rozo: ~1-3 sec, Axelar: ~5-10 sec)
 - Payment goes to `repaymentAddress` (solves cross-chain address mismatch)

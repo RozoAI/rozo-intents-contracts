@@ -64,9 +64,9 @@ rozoIntents.setChainIdToAxelarName(42161, "arbitrum"); // Arbitrum (if needed)
 rozoIntents.setTrustedContract("stellar", "STELLAR_CONTRACT_ADDRESS");
 rozoIntents.setTrustedContract("arbitrum", "0x...");
 
-// 6. Add relayers
-rozoIntents.addRelayer(relayerAddress1);
-rozoIntents.addRelayer(relayerAddress2);
+# Add relayers with their types
+rozoIntents.addRelayer(rozoRelayerAddress, 1);      // 1 = ROZO
+rozoIntents.addRelayer(externalRelayerAddress, 2); // 2 = EXTERNAL
 ```
 
 **Important:** Step 4 (`setChainIdToAxelarName`) is required for `fillAndNotify()` to route messages correctly. Without this mapping, cross-chain messages will fail.

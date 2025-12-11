@@ -883,7 +883,7 @@ error AlreadyFilled();
 | `IntentExpired` | `fillAndNotify()` after deadline | Intent can only be refunded now |
 | `IntentNotExpired` | `refund()` before deadline | Wait until `block.timestamp >= deadline` |
 | `NotRelayer` | Non-whitelisted address calls relayer function | Check `relayers[address]` mapping is not `NONE` |
-| `NotAssignedRelayer` | Wrong relayer tries to fill assigned intent | Only assigned relayer can fill; check `intentData.relayer` |
+| `NotAuthorizedRelayer` | Wrong relayer tries to fill assigned intent | Only assigned relayer or ROZO fallback can fill; check `intentData.relayer` |
 | `NotMessenger` | Non-messenger adapter calls `notify()` | Only registered messenger adapters can call |
 | `InvalidMessenger` | Invalid messengerId in `fillAndNotify()` | Use valid messengerId (0=Rozo, 1=Axelar) |
 | `FillHashMismatch` | Fill hash doesn't match expected | Intent parameters were tampered; admin investigates |
