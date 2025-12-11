@@ -52,7 +52,7 @@ Destination chain stores minimal state for fill tracking and cross-chain messagi
 contract RozoIntentsDestination {
     // ============ Fill Tracking ============
     // Tracks filled intents to prevent double-fills
-    // Key: keccak256(abi.encode(intentData, block.chainid))
+    // Key: keccak256(abi.encode(intentData))
     mapping(bytes32 => bool) public filledIntents;
 
     // ============ Access Control ============
@@ -138,7 +138,7 @@ struct IntentData {
 The destination chain computes a fill hash from all intent parameters to ensure uniqueness:
 
 ```solidity
-bytes32 fillHash = keccak256(abi.encode(intentData, block.chainid));
+bytes32 fillHash = keccak256(abi.encode(intentData));
 ```
 
 This prevents:
@@ -404,8 +404,8 @@ function fillAndNotify(
     }
     // If relayer is bytes32(0), any whitelisted relayer can fill
 
-    // 4. Compute fill hash from ALL intent parameters + destination chainId
-    bytes32 fillHash = keccak256(abi.encode(intentData, block.chainid));
+    // 4. Compute fill hash from ALL intent parameters
+    bytes32 fillHash = keccak256(abi.encode(intentData));
 
     // 5. Check if already filled (prevents double-fill attacks)
     require(!filledIntents[fillHash], "AlreadyFilled");
@@ -471,7 +471,7 @@ function notify(
     require(intent.status == IntentStatus.PENDING, "InvalidStatus");
 
     // 5. Recompute expected fillHash from stored intent data
-    bytes32 expectedFillHash = _computeFillHash(intent, sourceChainId);
+    bytes32 expectedFillHash = _computeFillHash(intent);
 
     // 6. Verify fillHash matches (binds all intent parameters)
     if (fillHash != expectedFillHash) {
@@ -511,7 +511,7 @@ function notify(
 The source chain recomputes the expected fill hash from the stored `Intent` struct to verify the fill:
 
 ```solidity
-function _computeFillHash(Intent storage intent, uint256 destinationChainId) internal view returns (bytes32) {
+function _computeFillHash(Intent storage intent) internal view returns (bytes32) {
     // Reconstruct IntentData from stored Intent
     IntentData memory intentData = IntentData({
         intentId: intent.intentId,
@@ -530,7 +530,7 @@ function _computeFillHash(Intent storage intent, uint256 destinationChainId) int
     });
 
     // Hash must match what destination chain computed
-    return keccak256(abi.encode(intentData, destinationChainId));
+    return keccak256(abi.encode(intentData));
 }
 ```
 

@@ -318,7 +318,7 @@ contract RozoIntentsDestination {
         }
 
         // 2. Check double-fill
-        bytes32 fillHash = keccak256(abi.encode(intentData, block.chainid));
+        bytes32 fillHash = keccak256(abi.encode(intentData));
         require(!filledIntents[fillHash], "AlreadyFilled");
         filledIntents[fillHash] = true;
 
@@ -352,7 +352,7 @@ contract RozoIntentsSource {
     mapping(uint8 => IMessengerAdapter) public messengerAdapters;
     mapping(bytes32 => Intent) public intents;
     
-    function _computeFillHash(Intent storage intent, uint256 destinationChainId) internal view returns (bytes32) {
+    function _computeFillHash(Intent storage intent) internal view returns (bytes32) {
         // Reconstruct IntentData from stored Intent
         IntentData memory intentData = IntentData({
             intentId: intent.intentId,
@@ -368,8 +368,8 @@ contract RozoIntentsSource {
             deadline: intent.deadline,
             relayer: bytes32(uint256(uint160(intent.relayer)))
         });
-        
-        return keccak256(abi.encode(intentData, destinationChainId));
+
+        return keccak256(abi.encode(intentData));
     }
 
     function notify(
@@ -394,7 +394,7 @@ contract RozoIntentsSource {
         if (intent.status != IntentStatus.PENDING) revert InvalidStatus();
 
         // 5. Recompute expected fillHash and verify
-        bytes32 expectedFillHash = _computeFillHash(intent, sourceChainId);
+        bytes32 expectedFillHash = _computeFillHash(intent);
         if (fillHash != expectedFillHash) revert FillHashMismatch();
 
         // 6. Mark as filled and pay relayer

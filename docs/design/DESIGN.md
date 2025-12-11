@@ -171,7 +171,7 @@ The destination chain tracks filled intents using a hash of the full `IntentData
 mapping(bytes32 => bool) public filledIntents;  // fillHash => filled
 
 // Fill hash computed from ALL intent parameters
-bytes32 fillHash = keccak256(abi.encode(intentData, block.chainid));
+bytes32 fillHash = keccak256(abi.encode(intentData));
 require(!filledIntents[fillHash], "AlreadyFilled");
 filledIntents[fillHash] = true;
 ```
