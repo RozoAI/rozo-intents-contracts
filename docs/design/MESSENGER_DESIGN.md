@@ -40,7 +40,7 @@ interface IMessengerAdapter {
     error InvalidChainId();
 
     /// @notice Send cross-chain notification
-    function sendMessage(uint256 destinationChainId, bytes calldata payload) external payable returns (bytes32 messageId);
+    function sendMessage(uint256 destinationChainId, bytes calldata payload) external returns (bytes32 messageId);
 
     /// @notice Verify incoming message and return decoded payload
     function verifyMessage(uint256 sourceChainId, bytes calldata messageData) external returns (bytes memory payload);
@@ -87,7 +87,7 @@ contract RozoMessengerAdapter is IMessengerAdapter {
 
     event MessageSent(bytes32 indexed messageId, uint256 destinationChainId, bytes payload);
 
-    function sendMessage(uint256 destinationChainId, bytes calldata payload) external payable returns (bytes32) {
+    function sendMessage(uint256 destinationChainId, bytes calldata payload) external returns (bytes32) {
         if (trustedContracts[destinationChainId] == bytes32(0)) revert InvalidChainId();
 
         bytes32 messageId = keccak256(abi.encodePacked(
@@ -144,7 +144,7 @@ contract AxelarMessengerAdapter is IMessengerAdapter {
     mapping(uint256 => string) public chainIdToAxelarName;
     mapping(string => string) public trustedContracts; // axelarChainName => contractAddress
 
-    function sendMessage(uint256 destinationChainId, bytes calldata payload) external payable returns (bytes32) {
+    function sendMessage(uint256 destinationChainId, bytes calldata payload) external returns (bytes32) {
         string memory chainName = chainIdToAxelarName[destinationChainId];
         if (bytes(chainName).length == 0) revert InvalidChainId();
 
@@ -231,9 +231,9 @@ fillAndNotify(intentData, repaymentAddress, messengerId)
 
 ---
 
-## Concern: Messenger Failure + Refund Race
+## Concern: Messenger Failure
 
-If the messenger fails to deliver `notify()` to the source chain before the intent deadline, there's a critical vulnerability:
+If the messenger fails to deliver `notify()` to the source chain, the relayer cannot receive repayment:
 
 ```
 Relayer fills on destination
@@ -246,20 +246,84 @@ Deadline passes on source chain
     ↓
 Intent still shows PENDING
     ↓
-User calls refund()
-    ↓
-User gets sourceAmount back
-    ↓
-RESULT: User paid twice, relayer loses funds
+RESULT: Relayer paid user but cannot get repaid
 ```
 
-**This affects ALL messengers** (Rozo, Axelar, any future messenger). Any messenger downtime or congestion near the deadline creates this risk.
+**This affects ALL messengers** (Rozo, Axelar, any future messenger). Any messenger downtime or congestion creates this risk for relayers.
 
-### Mitigation Strategies
+---
 
-1. **Extended Deadlines** - Relayers should use deadlines with sufficient buffer for messenger delivery
-2. **Messenger Monitoring** - Monitor messenger health before filling intents near deadline
-3. **Admin Recovery** - Admin can investigate and mark intent as FILLED if fill proof exists
+## Solution: Messenger Retry + Dataworker Refund
+
+### 1. Messenger Retry Mechanism
+
+If the primary messenger fails, relayer can retry notification via an alternative messenger on the **destination chain**:
+
+```
+Destination Chain                                        Source Chain
+      │                                                       │
+1. fillAndNotify(messengerId=0)                               │
+   filledIntents[fillHash] = true                             │
+   Rozo messenger fails ✗                                     │
+      │                                                       │
+2. Relayer detects notify() not delivered                     │
+      │                                                       │
+3. retryNotify(messengerId=1)                                 │
+   Axelar messenger sends ─────────────────────────────────► notify()
+      │                                                       │
+      │                                                  4. status = FILLED
+      │                                                     pay relayer
+```
+
+**Key points:**
+- `retryNotify()` verifies fill exists via `filledIntents[fillHash]`
+- Relayer can choose any registered messenger for retry
+- Source chain only pays once (protected by `intent.status` - must be PENDING)
+
+### 2. Dataworker-Controlled Refund
+
+To prevent race conditions, **users cannot call refund directly**. Refunds are controlled by the protocol's dataworker (owner):
+
+| Approach | User-Triggered Refund | Dataworker Refund |
+|----------|----------------------|-------------------|
+| Race condition risk | High - user can refund while messenger is delayed | None - dataworker verifies fill status first |
+| User experience | Instant refund after deadline | ~30-90 min after deadline |
+| Trust model | Trustless | Trust dataworker to process refunds |
+
+**Dataworker refund process:**
+
+```
+Source Chain                    Destination Chain              Dataworker
+      │                               │                           │
+      │ Deadline passes               │                           │
+      │ Intent still PENDING          │                           │
+      │                               │                           │
+      │                               │◄── Check filledIntents[fillHash]
+      │                               │                           │
+      │                               │───► false (not filled)    │
+      │                               │                           │
+      │◄─────────────────────────────────────── adminRefund(intentId)
+      │                               │                           │
+      │ status = REFUNDED             │                           │
+      │ funds → user                  │                           │
+```
+
+**Dataworker responsibilities:**
+1. Monitor intents that pass `deadline` and remain PENDING
+2. Verify on destination chain that `filledIntents[fillHash] = false`
+3. Only then call `adminRefund()` to return funds to user
+
+### 3. Double-Payment Protection
+
+Protection exists on **both chains**:
+
+| Chain | Protection | Prevents |
+|-------|------------|----------|
+| **Destination** | `filledIntents[fillHash] = true` | User receiving funds twice (double-fill) |
+| **Source** | `intent.status` must be PENDING | Relayer being paid twice (from retry) |
+| **Source** | Computed `fillHash` verification | Intent parameters tampering |
+
+**Source chain verification:** The `fillHash` is recomputed from stored intent data using `_computeFillHash()` and compared against the received `fillHash`. This ensures the fill matches the original intent parameters.
 
 ---
 
@@ -276,7 +340,7 @@ contract RozoIntentsDestination {
         IntentData calldata intentData,
         bytes32 repaymentAddress,
         uint8 messengerId // 0=Rozo (default), 1=Axelar, etc.
-    ) external payable {
+    ) external {
         // 1. Verify assigned relayer
         if (intentData.relayer != bytes32(0)) {
             require(bytes32(uint256(uint160(msg.sender))) == intentData.relayer, "NotAssignedRelayer");
@@ -303,7 +367,7 @@ contract RozoIntentsDestination {
             repaymentAddress
         );
 
-        adapter.sendMessage{value: msg.value}(intentData.sourceChainId, payload);
+        adapter.sendMessage(intentData.sourceChainId, payload);
 
         emit FillAndNotifySent(intentData.intentId, msg.sender, repaymentAddress, fillHash, messengerId);
     }

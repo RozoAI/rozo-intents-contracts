@@ -345,7 +345,7 @@ function fillAndNotify(
     IntentData calldata intentData,
     bytes32 repaymentAddress,    // Relayer's address on source chain for payout
     uint8 messengerId            // 0=Rozo (default), 1=Axelar
-) external payable;
+) external;
 ```
 
 #### fillAndNotify Parameters
@@ -363,7 +363,7 @@ function fillAndNotify(
     IntentData calldata intentData,
     bytes32 repaymentAddress,
     uint8 messengerId
-) external payable onlyWhitelistedRelayer {
+) external onlyWhitelistedRelayer {
     // 1. Verify we're on the correct destination chain
     require(intentData.destinationChainId == block.chainid, "WrongChain");
 
@@ -403,7 +403,7 @@ function fillAndNotify(
     );
 
     // 10. Send message via selected messenger
-    adapter.sendMessage{value: msg.value}(intentData.sourceChainId, payload);
+    adapter.sendMessage(intentData.sourceChainId, payload);
 
     // 11. Emit event
     emit FillAndNotifySent(
