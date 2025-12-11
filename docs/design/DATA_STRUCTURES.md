@@ -479,6 +479,35 @@ function notify(
 - Relayer verification happens on destination chain (not source) via `intentData.relayer`
 - On mismatch: sets FAILED instead of reverting (allows admin recovery)
 
+#### _computeFillHash Implementation
+
+The source chain recomputes the expected fill hash from the stored `Intent` struct to verify the fill:
+
+```solidity
+function _computeFillHash(Intent storage intent, uint256 destinationChainId) internal view returns (bytes32) {
+    // Reconstruct IntentData from stored Intent
+    IntentData memory intentData = IntentData({
+        intentId: intent.intentId,
+        sender: bytes32(uint256(uint160(intent.sender))),
+        refundAddress: bytes32(uint256(uint160(intent.refundAddress))),
+        sourceToken: bytes32(uint256(uint160(intent.sourceToken))),
+        sourceAmount: intent.sourceAmount,
+        sourceChainId: block.chainid,
+        destinationChainId: intent.destinationChainId,
+        destinationToken: intent.destinationToken,
+        receiver: intent.receiver,
+        destinationAmount: intent.destinationAmount,
+        deadline: intent.deadline,
+        relayer: bytes32(uint256(uint160(intent.relayer)))
+    });
+
+    // Hash must match what destination chain computed
+    return keccak256(abi.encode(intentData, destinationChainId));
+}
+```
+
+This ensures the fill hash received from the messenger matches exactly what would be computed from the original intent parameters.
+
 #### Relayer Prerequisites
 
 Before calling `fillAndNotify()`, relayer must:

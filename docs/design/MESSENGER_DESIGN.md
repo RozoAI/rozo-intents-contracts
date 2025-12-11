@@ -316,6 +316,26 @@ contract RozoIntentsDestination {
 contract RozoIntentsSource {
     mapping(uint8 => IMessengerAdapter) public messengerAdapters;
     mapping(bytes32 => Intent) public intents;
+    
+    function _computeFillHash(Intent storage intent, uint256 destinationChainId) internal view returns (bytes32) {
+        // Reconstruct IntentData from stored Intent
+        IntentData memory intentData = IntentData({
+            intentId: intent.intentId,
+            sender: bytes32(uint256(uint160(intent.sender))),
+            refundAddress: bytes32(uint256(uint160(intent.refundAddress))),
+            sourceToken: bytes32(uint256(uint160(intent.sourceToken))),
+            sourceAmount: intent.sourceAmount,
+            sourceChainId: block.chainid,
+            destinationChainId: intent.destinationChainId,
+            destinationToken: intent.destinationToken,
+            receiver: intent.receiver,
+            destinationAmount: intent.destinationAmount,
+            deadline: intent.deadline,
+            relayer: bytes32(uint256(uint160(intent.relayer)))
+        });
+        
+        return keccak256(abi.encode(intentData, destinationChainId));
+    }
 
     function notify(
         uint8 messengerId,
