@@ -34,6 +34,13 @@ contract RozoIntents {
 
     // Fee recipient (admin)
     address public feeRecipient;
+
+    // ============ Rozo Relayer Fallback ============
+    // Address of the Rozo relayer, which can fill intents if the assigned relayer fails
+    address public rozoRelayer;
+
+    // The threshold after which the Rozo relayer is allowed to fill an intent
+    uint256 public rozoRelayerThreshold; // e.g., 10 seconds
 }
 ```
 
@@ -60,6 +67,13 @@ contract RozoIntentsDestination {
 
     // Owner
     address public owner;
+
+    // ============ Rozo Relayer Fallback ============
+    // Address of the Rozo relayer, which can fill intents if the assigned relayer fails
+    address public rozoRelayer;
+
+    // The threshold after which the Rozo relayer is allowed to fill an intent
+    uint256 public rozoRelayerThreshold; // e.g., 10 seconds
 }
 ```
 
@@ -79,6 +93,7 @@ struct Intent {
     bytes32 receiver;           // Recipient on destination (bytes32 for cross-chain)
     uint256 destinationAmount;  // Minimum amount receiver expects
     uint64 deadline;            // Unix timestamp (seconds) - after this, refund allowed
+    uint64 createdAt;           // Timestamp of intent creation for fallback logic
     IntentStatus status;        // Current state
     address relayer;            // Assigned relayer (from RFQ) or address(0) for open intents
 }
@@ -103,6 +118,7 @@ struct IntentData {
     bytes32 receiver;
     uint256 destinationAmount;
     uint64 deadline;
+    uint64 createdAt;           // Timestamp of intent creation for fallback logic
     bytes32 relayer;            // Assigned relayer as bytes32 (address(0) for open intents)
 }
 ```
@@ -132,20 +148,31 @@ This prevents:
 
 ### Relayer Verification on Destination
 
-When an intent has an assigned relayer (`intentData.relayer != bytes32(0)`), the destination contract verifies that `msg.sender` matches the assigned relayer:
+When an intent has an assigned relayer (`intentData.relayer != bytes32(0)`), the destination contract verifies that `msg.sender` is either the assigned relayer or the Rozo fallback relayer after a specified threshold.
 
 ```solidity
-// If intent has assigned relayer, verify caller is that relayer
+// On the destination chain, new state variables are needed for the fallback logic
+address public rozoRelayer;
+uint256 public rozoRelayerThreshold; // e.g., 10 seconds
+
+// If intent has assigned relayer, verify caller is the assigned relayer OR the Rozo fallback relayer after the threshold
 if (intentData.relayer != bytes32(0)) {
     bytes32 callerBytes32 = bytes32(uint256(uint160(msg.sender)));
-    require(callerBytes32 == intentData.relayer, "NotAssignedRelayer");
+    bool isAssignedRelayer = (callerBytes32 == intentData.relayer);
+    
+    // The Rozo relayer can fill if the configured threshold has passed since intent creation
+    bool isRozoFallback = (callerBytes32 == bytes32(uint256(uint160(rozoRelayer))) &&
+                           block.timestamp > intentData.createdAt + rozoRelayerThreshold);
+
+    require(isAssignedRelayer || isRozoFallback, "NotAuthorizedRelayer");
 }
 // If relayer is address(0), any whitelisted relayer can fill (open intent)
 ```
 
 This ensures:
-- **RFQ-assigned intents**: Only the winning relayer from the RFQ auction can fill
-- **Open intents**: Any whitelisted relayer can fill when `relayer = address(0)`
+- **RFQ-assigned intents**: Only the winning relayer from the RFQ auction can fill within the `rozoRelayerThreshold` window.
+- **Rozo Relayer Fallback**: If the assigned relayer fails to act, the `rozoRelayer` can fill the intent after the threshold, providing a fulfillment guarantee.
+- **Open intents**: Any whitelisted relayer can fill when `relayer = address(0)`.
 
 ---
 
@@ -498,6 +525,7 @@ function _computeFillHash(Intent storage intent, uint256 destinationChainId) int
         receiver: intent.receiver,
         destinationAmount: intent.destinationAmount,
         deadline: intent.deadline,
+        createdAt: intent.createdAt,
         relayer: bytes32(uint256(uint160(intent.relayer)))
     });
 
@@ -643,6 +671,7 @@ pub struct IntentData {
     pub receiver: Address,           // Stellar receiver address
     pub destination_amount: i128,
     pub deadline: u64,
+    pub created_at: u64,             // Timestamp of intent creation for fallback logic
     pub relayer: BytesN<32>,         // Assigned relayer as bytes32 (zero for open intents)
 }
 ```
@@ -667,6 +696,7 @@ fn compute_fill_hash(env: &Env, intent_data: &IntentData) -> BytesN<32> {
     data.append(&intent_data.receiver.to_bytes());
     data.append(&Self::i128_to_bytes(env, intent_data.destination_amount));
     data.append(&Self::u64_to_bytes(env, intent_data.deadline));
+    data.append(&Self::u64_to_bytes(env, intent_data.created_at));
     data.append(&soroban_sdk::Bytes::from_slice(env, &intent_data.relayer.to_array()));
 
     env.crypto().sha256(&data)
@@ -676,12 +706,19 @@ fn compute_fill_hash(env: &Env, intent_data: &IntentData) -> BytesN<32> {
 ### Relayer Verification (Soroban)
 
 ```rust
-// Verify caller is assigned relayer (if intent has one)
+// Verify caller is assigned relayer OR the Rozo fallback relayer after a threshold
 let zero_relayer = BytesN::from_array(env, &[0u8; 32]);
 if intent_data.relayer != zero_relayer {
     let caller_bytes = Self::address_to_bytes32(env, &env.invoker());
-    if caller_bytes != intent_data.relayer {
-        return Err(Error::NotAssignedRelayer);
+    let is_assigned_relayer = caller_bytes == intent_data.relayer;
+
+    let rozo_relayer = Self::get_rozo_relayer(env); // Assuming a getter for rozo_relayer state
+    let rozo_relayer_threshold = Self::get_rozo_relayer_threshold(env); // Assuming a getter for the threshold
+    let is_rozo_fallback = caller_bytes == rozo_relayer &&
+                           env.ledger().timestamp() > intent_data.created_at + rozo_relayer_threshold;
+
+    if !is_assigned_relayer && !is_rozo_fallback {
+        return Err(Error::NotAuthorizedRelayer);
     }
 }
 // If relayer is zero, any whitelisted relayer can fill
@@ -697,6 +734,8 @@ pub enum DataKey {
     Gateway,
     TrustedContract(String),
     ChainIdToAxelarName(u64),
+    RozoRelayer,
+    RozoRelayerThreshold,
 }
 ```
 
@@ -718,6 +757,10 @@ function removeRelayer(address relayer) external onlyOwner;
 function setTrustedContract(string calldata chainName, string calldata contractAddress) external onlyOwner;
 function setMessengerAdapter(IMessengerAdapter adapter) external onlyOwner;  // Auto-registers by messengerId
 
+// ============ Rozo Relayer Fallback ============
+function setRozoRelayer(address _rozoRelayer) external onlyOwner;
+function setRozoRelayerThreshold(uint256 _threshold) external onlyOwner;
+
 // ============ Intent Recovery (for FAILED status) ============
 function setIntentStatus(bytes32 intentId, IntentStatus status) external onlyOwner;
 function setIntentRelayer(bytes32 intentId, address relayer) external onlyOwner;
@@ -729,8 +772,10 @@ function adminRefund(bytes32 intentId) external onlyOwner;
 | Function | Purpose | Example |
 |----------|---------|---------|
 | `setMessengerAdapter` | Registers messenger adapters (auto-assigns by ID) | `setMessengerAdapter(rozoAdapter)` |
+| `setRozoRelayer` | Sets the address of the Rozo fallback relayer | `setRozoRelayer(0x...)` |
+| `setRozoRelayerThreshold` | Sets the fallback time threshold in seconds | `setRozoRelayerThreshold(10)` |
 | `setTrustedContract` | Whitelists remote contracts | `setTrustedContract("stellar", "C...")` |
-| `addRelayer` | Whitelists relayer addresses | `addRelayer(0x...)` |
+| `addRelayer` | Whitelisters relayer addresses | `addRelayer(0x...)` |
 
 ### Admin Recovery Scenarios
 

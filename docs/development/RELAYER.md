@@ -117,13 +117,13 @@ User                    RFQ Server              Relayers            Source Chain
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | **Auction Window** | 3 seconds | Time for relayers to submit bids |
-| **Fulfillment Threshold** | 10 seconds | Maximum time for winning relayer to call `fillAndNotify()` |
-| **Rozo Relayer Fallback** | After 10s | If no fulfillment, Rozo relayer executes the fill |
+| **Fulfillment Threshold** | 10 seconds | The time window (`rozoRelayerThreshold`) for the assigned relayer to call `fillAndNotify()`. |
+| **Rozo Relayer Fallback** | After 10s | If the assigned relayer fails to fulfill, the designated `rozoRelayer` is permitted by the contract to execute the fill. This is enforced on-chain by checking `block.timestamp > intentData.createdAt + rozoRelayerThreshold`. |
 
 **Relayer Requirements:**
 - Relayers must deposit funds to be whitelisted
-- Winning an auction creates a commitment to fulfill within 10 seconds
-- **Penalty:** If a relayer wins an auction but fails to fulfill within 10 seconds (triggering Rozo relayer fallback), they are penalized from their deposited funds
+- Winning an auction creates a commitment to fulfill within the `rozoRelayerThreshold`
+- **Penalty:** If a relayer wins an auction but fails to fulfill within the `rozoRelayerThreshold` (triggering the Rozo relayer fallback), they are penalized from their deposited funds
 
 **Why deposits and penalties?**
 - Ensures fast fulfillment (10-second guarantee)
