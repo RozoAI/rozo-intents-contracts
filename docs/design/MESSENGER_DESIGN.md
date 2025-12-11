@@ -1,13 +1,21 @@
 # Messenger Design
 
-Messengers verify cross-chain fills and call `notify()` on RozoIntents. Multiple messenger options are supported via an adapter pattern.
+Messengers verify cross-chain fills and deliver notifications to RozoIntents. Multiple messenger options are supported via an adapter pattern.
+
+## Core Principle
+
+**Security is in the adapter's verification logic, not the caller's identity.**
+
+The adapter is a unified verification layer that proves message authenticity. Each messenger type implements its own security model (signatures, gateway validation, oracle consensus, etc.).
+
+---
 
 ## Supported Messengers
 
 | ID | Messenger | Speed | Security Model | Default |
 |----|-----------|-------|----------------|---------|
-| 0 | Rozo | ~1-3 sec | Rozo relayer network | ✓ |
-| 1 | Axelar | ~5-10 sec | 75+ independent validators | |
+| 0 | Rozo | ~1-3 sec | ECDSA signature from trusted signer | ✓ |
+| 1 | Axelar | ~5-10 sec | 75+ independent validators via Gateway | |
 
 **Relayers choose** which messenger to use for their repayment. Users receive funds instantly regardless of messenger choice.
 
@@ -17,10 +25,11 @@ Messengers verify cross-chain fills and call `notify()` on RozoIntents. Multiple
 
 1. Relayer calls `fillAndNotify()` on RozoIntents (destination chain)
 2. RozoIntents contract transfers tokens from relayer to receiver (user paid instantly)
-3. RozoIntents contract calls the selected messenger adapter
-4. Messenger network verifies the contract event
-5. Messenger calls `notify()` on RozoIntents (source chain)
-6. RozoIntents releases funds to relayer's repayment address
+3. RozoIntents contract calls adapter's `sendMessage()` which emits an event
+4. Messenger network detects event, verifies the fill, prepares proof
+5. `notify()` is called on RozoIntents (source chain) with the proof
+6. Adapter's `verifyMessage()` validates the proof (signature/gateway/oracle verification)
+7. If verification passes, RozoIntents releases funds to relayer's repayment address
 
 **Key:** The destination contract executes the payment, so the messenger verifies a real on-chain event - not just a relayer's claim.
 
@@ -83,9 +92,14 @@ Destination Chain          Rozo Relayer           Source Chain
 
 ```solidity
 contract RozoMessengerAdapter is IMessengerAdapter {
+    address public trustedSigner;  // Rozo's signing key
     mapping(uint256 => bytes32) public trustedContracts; // chainId => contractAddress
 
     event MessageSent(bytes32 indexed messageId, uint256 destinationChainId, bytes payload);
+
+    constructor(address _trustedSigner) {
+        trustedSigner = _trustedSigner;
+    }
 
     function sendMessage(uint256 destinationChainId, bytes calldata payload) external returns (bytes32) {
         if (trustedContracts[destinationChainId] == bytes32(0)) revert InvalidChainId();
@@ -101,10 +115,27 @@ contract RozoMessengerAdapter is IMessengerAdapter {
         return messageId;
     }
 
-    function verifyMessage(uint256 sourceChainId, bytes calldata messageData) external returns (bytes memory) {
-        (bytes32 sourceContract, bytes memory payload) = abi.decode(messageData, (bytes32, bytes));
+    function verifyMessage(uint256 sourceChainId, bytes calldata messageData) external view returns (bytes memory) {
+        (bytes32 sourceContract, bytes memory payload, bytes memory signature) =
+            abi.decode(messageData, (bytes32, bytes, bytes));
 
+        // Verify source contract is trusted
         if (sourceContract != trustedContracts[sourceChainId]) revert UntrustedSource();
+
+        // Verify signature from trusted Rozo signer
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            sourceChainId,
+            sourceContract,
+            payload
+        ));
+
+        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
+            "\x19Ethereum Signed Message:\n32",
+            messageHash
+        ));
+
+        address signer = _recoverSigner(ethSignedMessageHash, signature);
+        if (signer != trustedSigner) revert InvalidSignature();
 
         return payload;
     }
@@ -113,8 +144,32 @@ contract RozoMessengerAdapter is IMessengerAdapter {
         return 0;
     }
 
+    function _recoverSigner(bytes32 ethSignedMessageHash, bytes memory signature)
+        internal
+        pure
+        returns (address)
+    {
+        require(signature.length == 65, "Invalid signature length");
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+
+        return ecrecover(ethSignedMessageHash, v, r, s);
+    }
+
     function setTrustedContract(uint256 chainId, bytes32 contractAddr) external onlyOwner {
         trustedContracts[chainId] = contractAddr;
+    }
+
+    function setTrustedSigner(address _trustedSigner) external onlyOwner {
+        trustedSigner = _trustedSigner;
     }
 }
 ```
@@ -222,8 +277,8 @@ fillAndNotify(intentData, repaymentAddress, messengerId)
 
 | Aspect | Rozo Messenger | Axelar |
 |--------|----------------|--------|
-| Validator set | Single Rozo relayer | 75+ independent |
-| Trust model | Centralized (single relayer) | Decentralized |
+| Verification | ECDSA signature from trusted signer | 75+ independent validators |
+| Trust model | Centralized (single trusted signer) | Decentralized (validator set) |
 | Attack surface | Smaller (purpose-built) | Larger (general GMP) |
 | Failure mode | Rozo relayer down | Axelar network congestion |
 | Speed | ~1-3 seconds | ~5-10 seconds |
@@ -377,12 +432,11 @@ contract RozoIntentsSource {
         uint256 sourceChainId,
         bytes calldata messageData
     ) external {
-        // 1. Verify adapter
+        // 1. Verify adapter exists
         IMessengerAdapter adapter = messengerAdapters[messengerId];
         if (address(adapter) == address(0)) revert InvalidMessenger();
-        if (msg.sender != address(adapter)) revert NotMessenger();
 
-        // 2. Adapter verifies and decodes message
+        // 2. Adapter verifies message authenticity and decodes
         bytes memory payload = adapter.verifyMessage(sourceChainId, messageData);
 
         // 3. Decode: intentId, fillHash, repaymentAddress
@@ -424,6 +478,153 @@ contract RozoIntentsSource {
 2. **Hash Verification**: Source chain recomputes `fillHash` from stored intent data and verifies match
 3. **No Manipulation**: `fillHash` binds all intent parameters - any tampering will cause hash mismatch
 4. **Messenger ID 0 = Default**: No need for explicit default setter - ID 0 (Rozo) is implicit default
+
+---
+
+## Security Model: Defense in Depth
+
+The `notify()` function has no caller restrictions. Instead, security is ensured through multiple verification layers:
+
+### Layer 1: Adapter Verification (Primary)
+
+The adapter's `verifyMessage()` is where ALL security checks happen. Each messenger implements its own security model:
+
+**Rozo Messenger:**
+```solidity
+function verifyMessage(...) external view returns (bytes memory) {
+    // 1. Verify source contract is trusted
+    if (sourceContract != trustedContracts[sourceChainId]) revert UntrustedSource();
+
+    // 2. Verify ECDSA signature from trusted signer
+    address signer = _recoverSigner(ethSignedMessageHash, signature);
+    if (signer != trustedSigner) revert InvalidSignature();
+
+    return payload;
+}
+```
+
+**Axelar Messenger:**
+```solidity
+function verifyMessage(...) external view returns (bytes memory) {
+    // 1. Verify Axelar Gateway approved message (75+ validators)
+    if (!gateway.validateContractCall(...)) revert NotApproved();
+
+    // 2. Verify source contract is trusted
+    if (sourceAddr != trustedContracts[sourceChain]) revert UntrustedSource();
+
+    return payload;
+}
+```
+
+### Layer 2: FillHash Verification (Secondary)
+
+Even if adapter verification somehow passes incorrectly, the fillHash check provides additional protection:
+
+```solidity
+// Recompute fillHash from stored intent data
+bytes32 expectedFillHash = _computeFillHash(intent);
+
+// Compare with fillHash from message
+if (fillHash != expectedFillHash) revert FillHashMismatch();
+```
+
+This prevents:
+- Parameter tampering (changing amounts, addresses, tokens)
+- Replay attacks across different intents
+- Malicious payload construction
+
+### Layer 3: Status Check (Tertiary)
+
+```solidity
+if (intent.status != IntentStatus.PENDING) revert InvalidStatus();
+```
+
+This prevents:
+- Double payment (intent already FILLED)
+- Payment after refund (intent already REFUNDED)
+
+### Attack Scenarios
+
+| Attack | Result |
+|--------|--------|
+| Call `notify()` with random data | Adapter verification fails → revert |
+| Replay same valid message | Status check fails on 2nd call → revert |
+| Tamper with payload amounts | FillHash mismatch → revert |
+| Submit before fill happens | No valid proof exists yet → verification fails |
+| Front-run valid `notify()` call | Only first call succeeds, others revert → no impact |
+
+---
+
+## Rozo Relayer Off-Chain Logic
+
+The Rozo relayer monitors `MessageSent` events and submits signed notifications:
+
+```typescript
+import { createPublicClient, createWalletClient, http, parseAbiItem, keccak256, encodePacked, encodeAbiParameters } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+
+// Monitor destination chain for MessageSent events
+async function monitorFills() {
+  const publicClient = createPublicClient({
+    chain: destinationChain,
+    transport: http()
+  });
+
+  const walletClient = createWalletClient({
+    account: privateKeyToAccount(SIGNER_PRIVATE_KEY),
+    chain: sourceChain,
+    transport: http()
+  });
+
+  // Watch for MessageSent events
+  publicClient.watchEvent({
+    address: rozoAdapterAddress,
+    event: parseAbiItem('event MessageSent(bytes32 indexed messageId, uint256 destinationChainId, bytes payload)'),
+    onLogs: async (logs) => {
+      for (const log of logs) {
+        const { messageId, destinationChainId, payload } = log.args;
+
+        // Get source contract address
+        const sourceContract = await publicClient.readContract({
+          address: rozoAdapterAddress,
+          abi: rozoAdapterABI,
+          functionName: 'trustedContracts',
+          args: [destinationChainId]
+        });
+
+        // Create message hash
+        const messageHash = keccak256(
+          encodePacked(
+            ['uint256', 'bytes32', 'bytes'],
+            [destinationChainId, sourceContract, payload]
+          )
+        );
+
+        // Sign message
+        const signature = await walletClient.signMessage({
+          message: { raw: messageHash }
+        });
+
+        // Encode messageData for notify()
+        const messageData = encodeAbiParameters(
+          [{ type: 'bytes32' }, { type: 'bytes' }, { type: 'bytes' }],
+          [sourceContract, payload, signature]
+        );
+
+        // Submit notify() transaction
+        const hash = await walletClient.writeContract({
+          address: rozoIntentsSourceAddress,
+          abi: rozoIntentsABI,
+          functionName: 'notify',
+          args: [0, destinationChainId, messageData]
+        });
+
+        console.log(`Notification submitted: ${hash}`);
+      }
+    }
+  });
+}
+```
 
 ---
 
@@ -486,7 +687,18 @@ Source Chain                 Destination Chain              Axelar Network
 
 ---
 
+## Summary
+
+1. **Adapters are unified verification layers** - Security is in the adapter's verification logic, not the caller's identity
+2. **No caller restrictions on `notify()`** - The function uses adapter verification instead of `msg.sender` checks
+3. **Defense in depth** - Multiple protection layers: adapter verification, fillHash verification, status checks
+4. **Messenger flexibility** - Easy to add new messengers without modifying core contracts
+5. **Relayer choice** - Relayers choose their preferred messenger based on speed vs decentralization tradeoffs
+
+---
+
 ## References
 
 - [Axelar GMP Docs](https://docs.axelar.dev/dev/general-message-passing/overview/)
 - [Stellar GMP Example](https://github.com/axelarnetwork/stellar-gmp-example)
+- [EIP-191: Signed Data Standard](https://eips.ethereum.org/EIPS/eip-191)
