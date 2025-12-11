@@ -216,8 +216,8 @@ withdrawFees(token)       // feeRecipient withdraws accumulated fees
 
 ### Relayer Management
 ```solidity
-addRelayer(address)
-removeRelayer(address)
+addRelayer(address relayer, RelayerType relayerType)
+removeRelayer(address relayer)
 ```
 
 ### Intent Recovery (for FAILED status)

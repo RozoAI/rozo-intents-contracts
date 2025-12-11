@@ -730,12 +730,18 @@ if intent_data.relayer != zero_relayer {
 #[contracttype]
 pub enum DataKey {
     FilledIntent(BytesN<32>),  // fill_hash => bool
-    Relayers,
+    Relayers, // mapping(Address => RelayerType)
     Gateway,
     TrustedContract(String),
     ChainIdToAxelarName(u64),
-    RozoRelayer,
     RozoRelayerThreshold,
+}
+
+#[contracttype]
+pub enum RelayerType {
+    NONE,
+    ROZO,
+    EXTERNAL,
 }
 ```
 
@@ -876,7 +882,7 @@ error AlreadyFilled();
 | `InvalidStatus` | Function called on wrong status | Check current status via `intents[id].status` |
 | `IntentExpired` | `fillAndNotify()` after deadline | Intent can only be refunded now |
 | `IntentNotExpired` | `refund()` before deadline | Wait until `block.timestamp >= deadline` |
-| `NotRelayer` | Non-whitelisted address calls relayer function | Check `relayers[address]` mapping |
+| `NotRelayer` | Non-whitelisted address calls relayer function | Check `relayers[address]` mapping is not `NONE` |
 | `NotAssignedRelayer` | Wrong relayer tries to fill assigned intent | Only assigned relayer can fill; check `intentData.relayer` |
 | `NotMessenger` | Non-messenger adapter calls `notify()` | Only registered messenger adapters can call |
 | `InvalidMessenger` | Invalid messengerId in `fillAndNotify()` | Use valid messengerId (0=Rozo, 1=Axelar) |

@@ -113,7 +113,7 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | **Quote Bid** | Relayer's price offer for filling an intent |
 | **Auction Window** | Time period for relayers to submit bids (3 seconds) |
 | **Fulfillment Threshold** | The configurable window of time (`rozoRelayerThreshold`, e.g., 10 seconds) during which only the assigned relayer can fulfill an intent. After this period, the Rozo Relayer Fallback is activated. |
-| **Rozo Relayer Fallback** | A designated backup relayer (the `rozoRelayer`) that is contractually permitted to fill an intent if the assigned relayer fails to do so within the `rozoRelayerThreshold`. The `rozoRelayer` address and the threshold are configurable admin settings. |
+| **Rozo Relayer Fallback** | A capability where any relayer designated with type `ROZO` is contractually permitted to fill an intent if the assigned relayer fails to do so within the `rozoRelayerThreshold`. This provides a decentralized fallback mechanism. The threshold is a configurable admin setting. |
 | **Relayer Deposit** | Funds deposited by relayers as collateral for whitelisting |
 | **Penalty System** | Relayers who win but fail to fulfill are penalized from their deposits |
 | **Open Intent** | Intent with `relayer = address(0)`, any whitelisted relayer can fill |

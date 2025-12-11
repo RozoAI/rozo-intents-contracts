@@ -147,8 +147,10 @@ soroban contract invoke --id $CONTRACT_ID -- set_chain_id_to_axelar_name --chain
 soroban contract invoke --id $CONTRACT_ID -- set_trusted_contract --chain "base" --address "0x..."
 
 # ============ Relayer Management ============
-# Add relayers (must be whitelisted on BOTH chains)
-soroban contract invoke --id $CONTRACT_ID -- add_relayer --relayer $RELAYER_ADDRESS
+# Add relayers with their types (must be whitelisted on BOTH chains)
+# RelayerType: 0=NONE, 1=ROZO, 2=EXTERNAL
+soroban contract invoke --id $CONTRACT_ID -- add_relayer --relayer $ROZO_RELAYER_ADDRESS --relayer_type 1
+soroban contract invoke --id $CONTRACT_ID -- add_relayer --relayer $EXTERNAL_RELAYER_ADDRESS --relayer_type 2
 ```
 
 ### Stellar-Specific Configuration Notes

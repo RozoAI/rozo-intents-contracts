@@ -329,7 +329,7 @@ struct IntentData {
 ## Admin Functions
 
 ```solidity
-function addRelayer(address relayer) external onlyOwner;
+function addRelayer(address relayer, RelayerType relayerType) external onlyOwner;
 function removeRelayer(address relayer) external onlyOwner;
 ```
 
