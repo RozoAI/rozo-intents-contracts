@@ -781,7 +781,7 @@ function adminRefund(bytes32 intentId) external onlyOwner;
 | `setRozoRelayer` | Sets the address of the Rozo fallback relayer | `setRozoRelayer(0x...)` |
 | `setRozoRelayerThreshold` | Sets the fallback time threshold in seconds | `setRozoRelayerThreshold(10)` |
 | `setTrustedContract` | Whitelists remote contracts | `setTrustedContract("stellar", "C...")` |
-| `addRelayer` | Whitelisters relayer addresses | `addRelayer(0x...)` |
+| `addRelayer` | Whitelists relayer addresses | `addRelayer(0x...)` |
 
 ### Admin Recovery Scenarios
 
