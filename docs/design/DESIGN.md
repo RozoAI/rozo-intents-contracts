@@ -201,7 +201,7 @@ notify() on Base pays 0x1234... (relayer's EVM address)
 | Intent already filled on destination | Transaction reverts with "AlreadyFilled" |
 | `fillAndNotify()` succeeds but `notify()` fails verification | Intent set to FAILED, admin investigates |
 | Relayer never fills | Intent stays PENDING until deadline, then sender refunds |
-| Messenger fails to deliver | Relayer uses `retryNotify()` with alternative messenger. See [Messenger Failure](./MESSENGER_DESIGN.md#concern-messenger-failure) |
+| Messenger fails to deliver | Relayer uses `retryNotify(intentData, newMessengerId)` to resend the notification. |
 
 ---
 

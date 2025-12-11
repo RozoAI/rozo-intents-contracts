@@ -443,6 +443,52 @@ function fillAndNotify(
 }
 ```
 
+A new `retryNotify` function is added to the destination chain contract to handle messenger failures.
+
+#### retryNotify Logic
+
+If the initial messenger fails to deliver the notification, the original relayer can call `retryNotify` with the same `intentData` and a new `messengerId` to re-trigger the notification process.
+
+```solidity
+function retryNotify(
+    IntentData calldata intentData,
+    uint8 messengerId
+) external {
+    // 1. Recompute fillHash to find the original fill record
+    bytes32 fillHash = keccak256(abi.encode(intentData));
+
+    // 2. Verify the fill exists and the caller is the original relayer
+    FillRecord storage fill = filledIntents[fillHash];
+    require(fill.relayer == msg.sender, "NotRelayer");
+
+    // 3. Get the new messenger adapter
+    IMessengerAdapter adapter = messengerAdapters[messengerId];
+    require(address(adapter) != address(0), "InvalidMessenger");
+
+    // 4. Build the payload again
+    bytes32 actualRelayer = bytes32(uint256(uint160(msg.sender)));
+    bytes memory payload = abi.encode(
+        intentData.intentId,
+        fillHash,
+        fill.repaymentAddress, // Use the original repayment address
+        actualRelayer
+    );
+
+    // 5. Send message via the new messenger
+    adapter.sendMessage(intentData.sourceChainId, payload);
+
+    // 6. Emit an event
+    emit NotificationRetried(
+        intentData.intentId,
+        msg.sender,
+        fillHash,
+        messengerId
+    );
+}
+```
+
+This ensures that only the relayer who performed the initial fill can trigger a retry, preventing griefing attacks or accidental duplicate messages from other relayers. The source chain is protected from double-payment by the `intent.status` check in the `notify` function.
+
 #### Source Chain Verification (in `notify()`)
 
 Source chain's `notify()` receives the message and verifies via the messenger adapter:

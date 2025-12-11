@@ -316,18 +316,19 @@ Relayers should use sufficiently long deadlines to allow messenger time to deliv
 
 ### 2. Messenger Retry Mechanism
 
-If the primary messenger fails, relayer can retry notification via an alternative messenger on the **destination chain**:
+If the primary messenger fails, the relayer who originally filled the intent can retry notification via an alternative messenger on the **destination chain**.
 
 ```
 Destination Chain                                        Source Chain
       │                                                       │
-1. fillAndNotify(messengerId=0)                               │
-   filledIntents[fillHash] = true                             │
+1. fillAndNotify(intentData, messengerId=0)                   │
+   filledIntents[fillHash] stores relayer & repaymentAddr     │
    Rozo messenger fails ✗                                     │
       │                                                       │
 2. Relayer detects notify() not delivered                     │
       │                                                       │
-3. retryNotify(messengerId=1)                                 │
+3. retryNotify(intentData, messengerId=1)                     │
+   verify(msg.sender == original relayer)                     │
    Axelar messenger sends ─────────────────────────────────► notify()
       │                                                       │
       │                                                  4. status = FILLED
@@ -335,9 +336,44 @@ Destination Chain                                        Source Chain
 ```
 
 **Key points:**
-- `retryNotify()` verifies fill exists via `filledIntents[fillHash]`
-- Relayer can choose any registered messenger for retry
-- Source chain only pays once (protected by `intent.status` - must be PENDING)
+- `retryNotify()` recomputes the `fillHash` from `intentData` to find the original fill record.
+- It verifies that `msg.sender` was the original filler, preventing other relayers from interfering.
+- The relayer can choose any registered messenger for the retry.
+- The source chain is protected from double-payment because `notify()` only works on intents in `PENDING` status.
+
+### `retryNotify` Implementation
+
+```solidity
+function retryNotify(
+    IntentData calldata intentData,
+    uint8 messengerId
+) external {
+    // 1. Recompute fillHash to find the original fill record
+    bytes32 fillHash = keccak256(abi.encode(intentData));
+
+    // 2. Verify the fill exists and the caller is the original relayer
+    FillRecord storage fill = filledIntents[fillHash];
+    require(fill.relayer == msg.sender, "NotRelayer");
+
+    // 3. Get the new messenger adapter
+    IMessengerAdapter adapter = messengerAdapters[messengerId];
+    require(address(adapter) != address(0), "InvalidMessenger");
+
+    // 4. Build the payload again using the stored repayment address
+    bytes32 actualRelayer = bytes32(uint256(uint160(msg.sender)));
+    bytes memory payload = abi.encode(
+        intentData.intentId,
+        fillHash,
+        fill.repaymentAddress,
+        actualRelayer
+    );
+
+    // 5. Send message via the new messenger
+    adapter.sendMessage(intentData.sourceChainId, payload);
+
+    emit NotificationRetried(intentData.intentId, msg.sender, fillHash, messengerId);
+}
+```
 
 ### 3. Double-Payment Protection
 

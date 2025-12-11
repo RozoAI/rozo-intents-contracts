@@ -270,3 +270,4 @@ PENDING ──► (deadline passes) ──► refund() ──► REFUNDED
 - Relayer verification on destination chain (for assigned intents)
 - `repaymentAddress` specified by relayer for cross-chain payout
 - `fillHash` verification ensures intent parameters weren't tampered
+- **Messenger Failure**: If the messenger fails to deliver the notification, the original relayer can call `retryNotify` on the destination chain to resend the message with an alternative messenger.

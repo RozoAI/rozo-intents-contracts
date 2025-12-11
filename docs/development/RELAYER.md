@@ -171,6 +171,7 @@ User                    RFQ Server              Relayers            Source Chain
 | Function | Caller | Result |
 |----------|--------|--------|
 | `fillAndNotify()` | Relayer | Pay receiver, send messenger notification with repaymentAddress and messengerId |
+| `retryNotify()` | Original Relayer | Resend notification with a different messenger if the first one fails |
 
 ---
 

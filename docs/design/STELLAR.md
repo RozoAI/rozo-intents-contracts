@@ -165,14 +165,18 @@ pub fn notify(
 ### Destination Chain Functions (Stellar as destination)
 
 ```rust
-// Relayer pays receiver and sends Axelar message
 pub fn fill_and_notify(
     env: Env,
-    intent_id: BytesN<32>,
-    receiver: Address,               // Stellar receiver
-    token: Address,                  // Stellar token contract
-    amount: i128,
-    source_chain_id: u64,            // e.g., 8453 for Base
+    intent_data: IntentData,
+    repayment_address: BytesN<32>,
+    messenger_id: u8
+) -> Result<(), Error>;
+
+// Relayer retries sending notification if initial messenger fails
+pub fn retry_notify(
+    env: Env,
+    intent_data: IntentData,
+    messenger_id: u8
 ) -> Result<(), Error>;
 ```
 
