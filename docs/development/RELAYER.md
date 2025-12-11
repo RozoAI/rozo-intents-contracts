@@ -343,7 +343,7 @@ function removeRelayer(address relayer) external onlyOwner;
 | Double-fill attack | `filledIntents` mapping prevents duplicates |
 | Wrong relayer fills | `intentData.relayer` verification on destination |
 | Cross-chain address mismatch | `repaymentAddress` parameter |
-| Messenger failure before deadline | See [Messenger Failure + Refund Race](../design/MESSENGER_DESIGN.md#concern-messenger-failure--refund-race) |
+| Messenger fails to deliver | Use `retryNotify()` with alternative messenger. See [Messenger Failure](../design/MESSENGER_DESIGN.md#concern-messenger-failure) |
 
 ---
 

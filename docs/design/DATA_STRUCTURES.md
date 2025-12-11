@@ -592,7 +592,7 @@ bytes memory payload = abi.encode(
 | Already filled (fillHash exists) | Transaction reverts "AlreadyFilled" | None needed - already filled |
 | Invalid messenger ID | Transaction reverts "InvalidMessenger" | Use valid messengerId (0 or 1) |
 | Token transfer fails | Transaction reverts | Relayer retries or abandons |
-| Messenger fails to deliver | Intent stays PENDING | See [Messenger Failure + Refund Race](./MESSENGER_DESIGN.md#concern-messenger-failure--refund-race) |
+| Messenger fails to deliver | Relayer uses `retryNotify()` | See [Messenger Failure](./MESSENGER_DESIGN.md#concern-messenger-failure) |
 | `notify()` verification fails | Status = FAILED | Admin investigates |
 
 #### fillAndNotify Events

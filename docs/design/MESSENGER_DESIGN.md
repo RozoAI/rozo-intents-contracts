@@ -253,9 +253,13 @@ RESULT: Relayer paid user but cannot get repaid
 
 ---
 
-## Solution: Messenger Retry + Dataworker Refund
+## Solution: Extended Deadlines + Messenger Retry
 
-### 1. Messenger Retry Mechanism
+### 1. Extended Deadlines
+
+Relayers should use sufficiently long deadlines to allow messenger time to deliver, even under adverse conditions. Recommended minimum deadline buffer: 1 hour beyond expected messenger delivery time.
+
+### 2. Messenger Retry Mechanism
 
 If the primary messenger fails, relayer can retry notification via an alternative messenger on the **destination chain**:
 
@@ -279,39 +283,6 @@ Destination Chain                                        Source Chain
 - `retryNotify()` verifies fill exists via `filledIntents[fillHash]`
 - Relayer can choose any registered messenger for retry
 - Source chain only pays once (protected by `intent.status` - must be PENDING)
-
-### 2. Dataworker-Controlled Refund
-
-To prevent race conditions, **users cannot call refund directly**. Refunds are controlled by the protocol's dataworker (owner):
-
-| Approach | User-Triggered Refund | Dataworker Refund |
-|----------|----------------------|-------------------|
-| Race condition risk | High - user can refund while messenger is delayed | None - dataworker verifies fill status first |
-| User experience | Instant refund after deadline | ~30-90 min after deadline |
-| Trust model | Trustless | Trust dataworker to process refunds |
-
-**Dataworker refund process:**
-
-```
-Source Chain                    Destination Chain              Dataworker
-      │                               │                           │
-      │ Deadline passes               │                           │
-      │ Intent still PENDING          │                           │
-      │                               │                           │
-      │                               │◄── Check filledIntents[fillHash]
-      │                               │                           │
-      │                               │───► false (not filled)    │
-      │                               │                           │
-      │◄─────────────────────────────────────── adminRefund(intentId)
-      │                               │                           │
-      │ status = REFUNDED             │                           │
-      │ funds → user                  │                           │
-```
-
-**Dataworker responsibilities:**
-1. Monitor intents that pass `deadline` and remain PENDING
-2. Verify on destination chain that `filledIntents[fillHash] = false`
-3. Only then call `adminRefund()` to return funds to user
 
 ### 3. Double-Payment Protection
 
