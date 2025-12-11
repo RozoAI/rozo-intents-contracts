@@ -62,12 +62,12 @@ interface IMessengerAdapter {
 
 ## Rozo Messenger (Default)
 
-Custom lightweight messenger for fast relayer repayment. Optimized for the specific use case of verifying cross-chain fills.
+Custom lightweight messenger for fast relayer repayment. Optimized for the specific use case of verifying cross-chain fills. Uses a single Rozo-operated relayer that monitors fill events and delivers notifications.
 
 ### Architecture
 
 ```
-Destination Chain          Rozo Network           Source Chain
+Destination Chain          Rozo Relayer           Source Chain
        │                        │                      │
  fillAndNotify()                │                      │
        │                        │                      │
@@ -222,10 +222,10 @@ fillAndNotify(intentData, repaymentAddress, messengerId)
 
 | Aspect | Rozo Messenger | Axelar |
 |--------|----------------|--------|
-| Validator set | Rozo-operated | 75+ independent |
-| Trust model | Centralized (Rozo) | Decentralized |
+| Validator set | Single Rozo relayer | 75+ independent |
+| Trust model | Centralized (single relayer) | Decentralized |
 | Attack surface | Smaller (purpose-built) | Larger (general GMP) |
-| Failure mode | Rozo network down | Axelar network congestion |
+| Failure mode | Rozo relayer down | Axelar network congestion |
 | Speed | ~1-3 seconds | ~5-10 seconds |
 | Best for | Fast capital cycling | Maximum decentralization |
 
@@ -377,7 +377,7 @@ contract RozoIntentsSource {
 ### Fast Fill with Rozo Messenger (Default)
 
 ```
-Source Chain                 Destination Chain              Rozo Network
+Source Chain                 Destination Chain              Rozo Relayer
      │                              │                          │
 1. createIntent(relayer)            │                          │
    status = PENDING                 │                          │
@@ -387,7 +387,7 @@ Source Chain                 Destination Chain              Rozo Network
      │                          transfer: relayer → receiver   │
      │                          emit FillEvent ───────────────►│
      │                              │                          │
-     │                              │              3. Rozo relayers verify
+     │                              │              3. Rozo relayer verifies
      │                              │                 (~1-3 seconds)
      │                              │                          │
      │◄────────────────────────────────────────────── 4. notify()
