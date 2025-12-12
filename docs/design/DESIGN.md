@@ -168,12 +168,19 @@ The destination chain tracks filled intents using a hash of the full `IntentData
 
 ```solidity
 // Destination chain storage
-mapping(bytes32 => bool) public filledIntents;  // fillHash => filled
+mapping(bytes32 => FillRecord) public filledIntents;  // fillHash => FillRecord
+
+struct FillRecord {
+    address relayer;              // Original relayer on destination
+    bytes32 repaymentAddress;     // Relayer's source chain address
+}
 
 // Fill hash computed from ALL intent parameters
 bytes32 fillHash = keccak256(abi.encode(intentData));
-require(!filledIntents[fillHash], "AlreadyFilled");
-filledIntents[fillHash] = true;
+FillRecord storage fill = filledIntents[fillHash];
+require(fill.relayer == address(0), "AlreadyFilled");
+fill.relayer = msg.sender;
+fill.repaymentAddress = repaymentAddress;
 ```
 
 ### Cross-Chain Repayment Address

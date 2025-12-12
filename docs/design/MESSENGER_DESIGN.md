@@ -381,11 +381,42 @@ Protection exists on **both chains**:
 
 | Chain | Protection | Prevents |
 |-------|------------|----------|
-| **Destination** | `filledIntents[fillHash] = true` | User receiving funds twice (double-fill) |
+| **Destination** | `FillRecord` stored (fill.relayer != address(0))` | User receiving funds twice (double-fill), griefing retries |
 | **Source** | `intent.status` must be PENDING | Relayer being paid twice (from retry) |
 | **Source** | Computed `fillHash` verification | Intent parameters tampering |
 
+**Destination chain verification:** The `FillRecord` is checked on `fillAndNotify()` to ensure the intent hasn't been filled before. On `retryNotify()`, it verifies the caller is the original relayer (`fill.relayer == msg.sender`) and retrieves the stored `repaymentAddress`.
+
 **Source chain verification:** The `fillHash` is recomputed from stored intent data using `_computeFillHash()` and compared against the received `fillHash`. This ensures the fill matches the original intent parameters.
+
+---
+
+## FillRecord: Enabling Messenger Retries
+
+The destination chain stores a `FillRecord` for each fill to enable the retry mechanism when messengers fail:
+
+```solidity
+/// @notice Fill record stored on destination chain for retries
+/// @dev Used to track who performed the fill and where to send payout
+struct FillRecord {
+    address relayer;              // Who performed the fill (original relayer address)
+    bytes32 repaymentAddress;     // Where to send payout on source chain
+}
+```
+
+### Why FillRecord Matters
+
+When `fillAndNotify()` executes, it stores a `FillRecord` alongside marking the intent as filled:
+
+1. **Relayer Attribution**: The `relayer` field records who called `fillAndNotify()` so only that relayer can retry
+2. **Repayment Consistency**: The `repaymentAddress` field preserves the relayer's source chain address for payout
+
+If the initial messenger fails, `retryNotify()` can:
+- Verify `msg.sender == fill.relayer` (only original relayer can retry)
+- Retrieve the stored `repaymentAddress` (same address as original fill)
+- Resend the notification via an alternative messenger
+
+This prevents griefing attacks where other relayers could interfere with retries, and ensures consistent repayment addresses across retry attempts.
 
 ---
 
@@ -396,7 +427,7 @@ Protection exists on **both chains**:
 ```solidity
 contract RozoIntentsDestination {
     mapping(uint8 => IMessengerAdapter) public messengerAdapters;
-    mapping(bytes32 => bool) public filledIntents;
+    mapping(bytes32 => FillRecord) public filledIntents;
 
     function fillAndNotify(
         IntentData calldata intentData,
@@ -408,10 +439,12 @@ contract RozoIntentsDestination {
             require(bytes32(uint256(uint160(msg.sender))) == intentData.relayer, "NotAssignedRelayer");
         }
 
-        // 2. Check double-fill
+        // 2. Check double-fill and store FillRecord
         bytes32 fillHash = keccak256(abi.encode(intentData));
-        require(!filledIntents[fillHash], "AlreadyFilled");
-        filledIntents[fillHash] = true;
+        FillRecord storage fill = filledIntents[fillHash];
+        require(fill.relayer == address(0), "AlreadyFilled");  // Check if previously filled
+        fill.relayer = msg.sender;
+        fill.repaymentAddress = repaymentAddress;
 
         // 3. Transfer tokens to receiver
         address receiver = address(uint160(uint256(intentData.receiver)));
@@ -422,11 +455,13 @@ contract RozoIntentsDestination {
         IMessengerAdapter adapter = messengerAdapters[messengerId];
         if (address(adapter) == address(0)) revert InvalidMessenger();
 
-        // 5. Build payload: intentId, fillHash, repaymentAddress
+        // 5. Build payload: intentId, fillHash, repaymentAddress, relayer
+        bytes32 actualRelayer = bytes32(uint256(uint160(msg.sender)));
         bytes memory payload = abi.encode(
             intentData.intentId,
             fillHash,
-            repaymentAddress
+            repaymentAddress,
+            actualRelayer
         );
 
         adapter.sendMessage(intentData.sourceChainId, payload);
@@ -475,9 +510,9 @@ contract RozoIntentsSource {
         // 2. Adapter verifies message authenticity and decodes
         bytes memory payload = adapter.verifyMessage(sourceChainId, messageData);
 
-        // 3. Decode: intentId, fillHash, repaymentAddress
-        (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress) =
-            abi.decode(payload, (bytes32, bytes32, bytes32));
+        // 3. Decode: intentId, fillHash, repaymentAddress, relayer
+        (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress, bytes32 relayer) =
+            abi.decode(payload, (bytes32, bytes32, bytes32, bytes32));
 
         // 4. Get intent and verify state
         Intent storage intent = intents[intentId];
@@ -510,10 +545,12 @@ contract RozoIntentsSource {
 
 ### Payload Security
 
-1. **Minimal Payload**: Only `intentId`, `fillHash`, `repaymentAddress`, and `relayer` cross the messenger.
-2. **Hash Verification**: Source chain recomputes `fillHash` from stored intent data and verifies match
-3. **No Manipulation**: `fillHash` binds all intent parameters - any tampering will cause hash mismatch
-4. **Messenger ID 0 = Default**: No need for explicit default setter - ID 0 (Rozo) is implicit default
+1. **Unified Payload Format**: Both `fillAndNotify` and `retryNotify` use the same payload structure
+2. **Consistent Encoding**: `abi.encode(intentId, fillHash, repaymentAddress, actualRelayer)`
+3. **Hash Verification**: Source chain recomputes `fillHash` from stored intent data and verifies match
+4. **No Manipulation**: `fillHash` binds all intent parameters - any tampering will cause hash mismatch
+5. **Relayer Attribution**: The `relayer` field tracks who performed the fill for both initial fills and retries
+6. **Messenger ID 0 = Default**: No need for explicit default setter - ID 0 (Rozo) is implicit default
 
 ---
 

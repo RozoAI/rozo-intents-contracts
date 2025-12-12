@@ -51,9 +51,10 @@ Destination chain stores minimal state for fill tracking and cross-chain messagi
 ```solidity
 contract RozoIntentsDestination {
     // ============ Fill Tracking ============
-    // Tracks filled intents to prevent double-fills
+    // Tracks filled intents with relayer and repayment address for retries
     // Key: keccak256(abi.encode(intentData))
-    mapping(bytes32 => bool) public filledIntents;
+    // Value: FillRecord containing relayer info and repayment address
+    mapping(bytes32 => FillRecord) public filledIntents;
 
     // ============ Access Control ============
     // Relayer whitelist
@@ -145,6 +146,64 @@ This prevents:
 - **Double-fills**: Same intent cannot be filled twice
 - **Parameter tampering**: Relayer cannot change amounts/receiver
 - **Cross-chain replay**: Different chainId = different hash
+
+## FillRecord Struct (Destination Chain)
+
+The `FillRecord` struct stores metadata about fills to enable the messenger retry mechanism when the initial messenger fails to deliver the notification.
+
+```solidity
+/// @notice Fill record stored on destination chain for retries
+/// @dev Used to track who performed the fill and where to send payout
+struct FillRecord {
+    address relayer;              // Who performed the fill (original relayer address on destination chain)
+    bytes32 repaymentAddress;     // Where to send payout on source chain (relayer's source chain address)
+}
+```
+
+### FillRecord Purpose and Usage
+
+The `FillRecord` struct solves a critical problem in the cross-chain fill process:
+
+**The Problem:**
+If a relayer calls `fillAndNotify()` on the destination chain and the messenger fails to deliver the `notify()` message to the source chain, the relayer gets stuck—they've already paid the user but can't be repaid.
+
+**The Solution:**
+`FillRecord` enables the **messenger retry mechanism** via the `retryNotify()` function. When the primary messenger fails, the original relayer can call `retryNotify()` with an alternative messenger, and the contract will:
+1. Verify the caller is the original relayer (using `fill.relayer == msg.sender`)
+2. Retrieve the stored repayment address (`fill.repaymentAddress`)
+3. Resend the notification via the new messenger
+
+### FillRecord Storage Lifecycle
+
+```solidity
+// 1. Created in fillAndNotify()
+bytes32 fillHash = keccak256(abi.encode(intentData));
+filledIntents[fillHash] = FillRecord({
+    relayer: msg.sender,                    // Original relayer on destination chain
+    repaymentAddress: repaymentAddress      // Relayer's address on source chain
+});
+
+// 2. Accessed in retryNotify()
+FillRecord storage fill = filledIntents[fillHash];
+require(fill.relayer == msg.sender, "NotRelayer");      // Only original relayer can retry
+
+// 3. Used to rebuild payload with correct repayment address
+bytes memory payload = abi.encode(
+    intentData.intentId,
+    fillHash,
+    fill.repaymentAddress,      // Uses stored address (same as original fill)
+    actualRelayer
+);
+```
+
+### FillRecord Security Features
+
+| Protection | How FillRecord Helps |
+|------------|----------------------|
+| **Only original relayer can retry** | `fill.relayer == msg.sender` authorization check |
+| **Correct repayment address** | Uses stored `fill.repaymentAddress` instead of requiring it again |
+| **Prevention of griefing** | Other relayers cannot interfere with retry attempts |
+| **Consistent payload** | Retries use the exact same repayment address as original fill |
 
 ### Relayer Verification on Destination
 
@@ -302,22 +361,28 @@ require(block.timestamp <= intentData.deadline, "IntentExpired");
 
 ## notify Payload
 
-When a messenger delivers a fill confirmation, the payload contains 3 parameters (minimal payload for security):
+When a messenger delivers a fill confirmation, the payload contains 4 parameters (minimal payload for security):
 
 ```solidity
 struct NotifyPayload {
     bytes32 intentId;           // Which intent was filled
     bytes32 fillHash;           // Hash of all intent parameters (verified on source)
     bytes32 repaymentAddress;   // Where to send payout on source chain
+    bytes32 relayer;            // Who performed the fill (for retry tracking)
 }
 ```
 
-Encoding (sent by `fillAndNotify()`):
+Encoding (sent by both `fillAndNotify()` and `retryNotify()`):
 ```solidity
-bytes memory payload = abi.encode(intentId, fillHash, repaymentAddress);
+bytes memory payload = abi.encode(
+    intentId,
+    fillHash,
+    fill.repaymentAddress,
+    actualRelayer              // Current relayer (msg.sender as bytes32)
+);
 ```
 
-**Security:** The source chain recomputes `fillHash` from stored intent data and verifies it matches. This binds all intent parameters - any tampering will cause hash mismatch.
+**Security:** The source chain recomputes `fillHash` from stored intent data and verifies it matches. This binds all intent parameters - any tampering will cause hash mismatch. The `relayer` field tracks who performed the fill for proper attribution in retry scenarios.
 
 ### Repayment Address
 
@@ -422,11 +487,13 @@ function fillAndNotify(
     IMessengerAdapter adapter = messengerAdapters[messengerId];
     require(address(adapter) != address(0), "InvalidMessenger");
 
-    // 9. Build minimal payload (intentId, fillHash, repaymentAddress)
+    // 9. Build payload (4 parameters: intentId, fillHash, repaymentAddress, relayer)
+    bytes32 actualRelayer = bytes32(uint256(uint160(msg.sender)));
     bytes memory payload = abi.encode(
         intentData.intentId,
         fillHash,
-        repaymentAddress
+        repaymentAddress,
+        actualRelayer
     );
 
     // 10. Send message via selected messenger
@@ -507,9 +574,9 @@ function notify(
     // 2. Adapter verifies and decodes message
     bytes memory payload = adapter.verifyMessage(sourceChainId, messageData);
 
-    // 3. Decode minimal payload
-    (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress) =
-        abi.decode(payload, (bytes32, bytes32, bytes32));
+    // 3. Decode 4-parameter payload
+    (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress, bytes32 relayer) =
+        abi.decode(payload, (bytes32, bytes32, bytes32, bytes32));
 
     Intent storage intent = intents[intentId];
 
@@ -626,25 +693,27 @@ Relayer Workflow for fillAndNotify():
 
 #### Messenger Payload Format
 
-The minimal payload sent via messenger adapter (same format for all messengers):
+The payload sent via messenger adapter (same format for all messengers, used by both fillAndNotify and retryNotify):
 
 ```solidity
-// Encoding (3 parameters - minimal for security)
+// Encoding (4 parameters - same for both fillAndNotify and retryNotify)
 bytes memory payload = abi.encode(
-    intentId,           // bytes32 - which intent
-    fillHash,           // bytes32 - hash of all intent parameters (verified on source)
-    repaymentAddress    // bytes32 - relayer's source chain address for payout
+    intentId,               // bytes32 - which intent
+    fillHash,               // bytes32 - hash of all intent parameters (verified on source)
+    repaymentAddress,       // bytes32 - relayer's source chain address for payout
+    actualRelayer           // bytes32 - who performed the fill (msg.sender as bytes32)
 );
 
 // Decoding on source chain
 (
     bytes32 intentId,
     bytes32 fillHash,
-    bytes32 repaymentAddress
-) = abi.decode(payload, (bytes32, bytes32, bytes32));
+    bytes32 repaymentAddress,
+    bytes32 relayer
+) = abi.decode(payload, (bytes32, bytes32, bytes32, bytes32));
 ```
 
-**Security:** The `fillHash` binds all intent parameters. Source chain recomputes the expected hash from stored intent data and verifies it matches.
+**Security:** The `fillHash` binds all intent parameters. Source chain recomputes the expected hash from stored intent data and verifies it matches. The `relayer` field provides attribution for both initial fills and retries.
 
 #### Gas Payment
 

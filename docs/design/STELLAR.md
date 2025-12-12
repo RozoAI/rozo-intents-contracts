@@ -315,6 +315,7 @@ fn i128_to_abi_bytes(env: &Env, value: i128) -> Bytes {
 }
 
 /// Encode notify payload matching Solidity's abi.encode format
+/// intentId, fillHash, repaymentAddress, relayer
 /// Total: 4 * 32 = 128 bytes
 fn encode_notify_payload(
     env: &Env,
@@ -325,7 +326,7 @@ fn encode_notify_payload(
 ) -> Bytes {
     let mut payload = Bytes::new(env);
 
-    // Each field must be exactly 32 bytes
+    // Each field must be exactly 32 bytes (Solidity ABI encoding)
     payload.append(&Bytes::from_slice(env, &intent_id.to_array()));
     payload.append(&Bytes::from_slice(env, &fill_hash.to_array()));
     payload.append(&Bytes::from_slice(env, &repayment_address.to_array()));
@@ -379,13 +380,12 @@ fn test_payload_encoding() {
     let payload = encode_notify_payload(
         &env,
         BytesN::from_array(&env, &[1u8; 32]),  // intentId
-        1000_0000000i128,                       // 1000 USDC (7 decimals)
-        BytesN::from_array(&env, &[2u8; 32]),  // relayer
-        BytesN::from_array(&env, &[3u8; 32]),  // receiver
-        BytesN::from_array(&env, &[4u8; 32]),  // destToken
+        BytesN::from_array(&env, &[2u8; 32]),  // fillHash
+        BytesN::from_array(&env, &[3u8; 32]),  // repaymentAddress
+        BytesN::from_array(&env, &[4u8; 32]),  // relayer
     );
 
-    assert_eq!(payload.len(), 160);  // Must be exactly 160 bytes
+    assert_eq!(payload.len(), 128);  // Must be exactly 128 bytes (4 * 32)
 }
 ```
 

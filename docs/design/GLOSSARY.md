@@ -123,7 +123,8 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 
 | Term | Description |
 |------|-------------|
-| **filledIntents** | Mapping on destination chain tracking filled intents (prevents double-fill) |
+| **FillRecord** | Struct storing relayer and repayment address for each fill (enables retries) |
+| **filledIntents** | Mapping on destination chain storing FillRecord for each fill (prevents double-fill, enables retries) |
 | **Relayer Whitelist** | Admin-managed list of allowed relayers |
 | **Trusted Contracts** | Cross-chain contract addresses verified for messenger messages |
 | **Repayment Address** | Relayer's address on source chain where payout is sent |
