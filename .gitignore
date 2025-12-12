@@ -4,3 +4,5 @@ reference/
 docs/.DS_Store
 
 CLAUDE.md
+config.bat
+node_modules
