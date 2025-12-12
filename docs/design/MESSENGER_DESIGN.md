@@ -749,6 +749,80 @@ Source Chain                 Destination Chain              Axelar Network
 
 ---
 
+## Sequence Diagrams
+
+### Fill with Rozo Messenger
+
+```mermaid
+sequenceDiagram
+    actor Relayer
+    participant DestChain as Destination<br/>Chain
+    participant RozoAdapter as Rozo<br/>Adapter
+    participant RozoRelayer as Rozo<br/>Relayer
+    participant SrcChain as Source<br/>Chain
+
+    Relayer->>DestChain: 1. fillAndNotify(intentData,<br/>repaymentAddr, messengerId=0)
+    Note over DestChain: Verify assigned relayer<br/>Transfer tokens to receiver<br/>Store FillRecord
+    DestChain->>RozoAdapter: 2. sendMessage(payload)
+    RozoAdapter->>RozoAdapter: Emit MessageSent event
+    RozoRelayer->>RozoAdapter: 3. Watch MessageSent event
+    RozoRelayer->>RozoRelayer: Sign message with private key<br/>(~1-3 seconds)
+    RozoRelayer->>SrcChain: 4. notify(messengerId=0,<br/>sourceChainId, messageData)
+    Note over SrcChain: RozoAdapter.verifyMessage():<br/>  - Verify ECDSA signature<br/>  - Verify source contract<br/>Verify fillHash matches<br/>Verify intent status=PENDING
+    SrcChain->>SrcChain: 5. Mark intent as FILLED<br/>Pay relayer from source tokens
+    Note over SrcChain: Relayer repaid ✓
+```
+
+### Fill with Axelar Messenger
+
+```mermaid
+sequenceDiagram
+    actor Relayer
+    participant DestChain as Destination<br/>Chain
+    participant AxelarAdapter as Axelar<br/>Adapter
+    participant Gateway as Axelar<br/>Gateway
+    participant Validators as 75+<br/>Validators
+    participant SrcChain as Source<br/>Chain
+
+    Relayer->>DestChain: 1. fillAndNotify(intentData,<br/>repaymentAddr, messengerId=1)
+    Note over DestChain: Verify assigned relayer<br/>Transfer tokens to receiver<br/>Store FillRecord
+    DestChain->>AxelarAdapter: 2. sendMessage(payload)
+    AxelarAdapter->>Gateway: 3. callContract(chainName,<br/>destContract, payload)
+    Gateway->>Validators: 4. Relay message to validators<br/>(~5-10 seconds)
+    Validators->>Validators: Reach consensus on message<br/>Generate proof
+    Validators->>SrcChain: 5. Call notify() with proof
+    Note over SrcChain: AxelarAdapter.verifyMessage():<br/>  - Call gateway.validateContractCall()<br/>  - Verify source contract<br/>Verify fillHash matches<br/>Verify intent status=PENDING
+    SrcChain->>SrcChain: 6. Mark intent as FILLED<br/>Pay relayer from source tokens
+    Note over SrcChain: Relayer repaid ✓
+```
+
+### Messenger Retry Flow (Fallback)
+
+```mermaid
+sequenceDiagram
+    actor Relayer
+    participant DestChain as Destination<br/>Chain
+    participant Messenger1 as Primary<br/>Messenger
+    participant Messenger2 as Alternative<br/>Messenger
+    participant SrcChain as Source<br/>Chain
+
+    Relayer->>DestChain: 1. fillAndNotify(intentData,<br/>repaymentAddr, messengerId=0)
+    Note over DestChain: Transfer tokens<br/>Store FillRecord
+    DestChain->>Messenger1: 2. sendMessage(payload)
+    Messenger1-->>SrcChain: 3. Primary messenger fails ✗
+
+    Note over Relayer: Detect notify() not delivered<br/>to source chain
+
+    Relayer->>DestChain: 4. retryNotify(intentData,<br/>messengerId=1)
+    Note over DestChain: Verify msg.sender=original relayer<br/>Retrieve stored FillRecord<br/>Reconstruct payload with same repaymentAddr
+    DestChain->>Messenger2: 5. sendMessage(payload)
+    Messenger2->>SrcChain: 6. notify() with alternative<br/>messenger
+    Note over SrcChain: Verify message authenticity<br/>Verify fillHash<br/>Verify intent still PENDING
+    SrcChain->>SrcChain: 7. Mark intent as FILLED<br/>Pay relayer ✓
+```
+
+---
+
 ## Trusted Contracts (Example)
 
 | Chain | Contract |
