@@ -61,7 +61,9 @@ Other stablecoins (USDT, etc.) may be added. Exotic tokens technically work but:
 | **Sender** | User who initiates payment |
 | **Receiver** | Recipient on destination chain |
 | **Relayer** | Service that pays on destination, gets repaid on source (aka Solver/Filler) |
-| **Messenger** | Cross-chain verification (Axelar) |
+| **Messenger** | Cross-chain verification service. Multiple options: Rozo (default, ~1-3 sec) or Axelar (~5-10 sec) |
+| **Messenger Adapter** | Contract implementing `IMessengerAdapter` interface to support different messengers |
+| **messengerId** | Identifier for messenger selection: 0=Rozo (default), 1=Axelar |
 
 ## Amount Terms
 
@@ -77,7 +79,7 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | Status | Description |
 |--------|-------------|
 | **PENDING** | Sender deposited, waiting for fill |
-| **FILLED** | Fill completed (via `notify()` or `slowFill()`) |
+| **FILLED** | Fill completed (via `notify()`) |
 | **FAILED** | Fill verification failed, admin must investigate |
 | **REFUNDED** | Sender refunded |
 
@@ -88,22 +90,20 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | Function | Caller | Description |
 |----------|--------|-------------|
 | `createIntent()` | Sender | Deposit funds, optionally assign relayer from RFQ |
-| `slowFill()` | Relayer | Bridge via CCTP → FILLED directly |
-| `notify()` | Messenger only | Confirm fast fill → FILLED, pay relayer |
+| `notify()` | Messenger adapter only | Confirm fast fill → FILLED, pay relayer |
 | `refund()` | Sender or refundAddress | Refund expired intent |
 
 ### Destination Chain
 
 | Function | Caller | Description |
 |----------|--------|-------------|
-| `fillAndNotify()` | Relayer | Pay receiver, specify repayment address, send Axelar message |
+| `fillAndNotify()` | Relayer | Pay receiver, specify repayment address and messengerId, send notification via selected messenger |
 
 ## Fill Modes
 
 | Mode | Status Flow | Relayer Profit |
 |------|-------------|----------------|
 | **Fast Fill** | PENDING → FILLED | Yes (spread) |
-| **Slow Fill** | PENDING → FILLED | No (service only) |
 
 ## RFQ Terms
 
@@ -112,8 +112,8 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | **Quote Request** | User's request for price quote from relayers |
 | **Quote Bid** | Relayer's price offer for filling an intent |
 | **Auction Window** | Time period for relayers to submit bids (3 seconds) |
-| **Fulfillment Threshold** | Maximum time for winning relayer to fulfill (10 seconds) |
-| **Rozo Relayer Fallback** | Rozo relayer executes fill if winner doesn't fulfill within 10 seconds |
+| **Fulfillment Threshold** | The configurable window of time (`rozoRelayerThreshold`, e.g., 10 seconds) during which only the assigned relayer can fulfill an intent. After this period, the Rozo Relayer Fallback is activated. |
+| **Rozo Relayer Fallback** | A capability where any relayer designated with type `ROZO` is contractually permitted to fill an intent if the assigned relayer fails to do so within the `rozoRelayerThreshold`. This provides a decentralized fallback mechanism. |
 | **Relayer Deposit** | Funds deposited by relayers as collateral for whitelisting |
 | **Penalty System** | Relayers who win but fail to fulfill are penalized from their deposits |
 | **Open Intent** | Intent with `relayer = address(0)`, any whitelisted relayer can fill |
@@ -123,9 +123,11 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 
 | Term | Description |
 |------|-------------|
-| **filledIntents** | Mapping on destination chain tracking filled intents (prevents double-fill) |
+| **FillRecord** | Struct storing relayer and repayment address for each fill (enables retries) |
+| **filledIntents** | Mapping on destination chain storing FillRecord for each fill (prevents double-fill, enables retries) |
 | **Relayer Whitelist** | Admin-managed list of allowed relayers |
-| **Trusted Contracts** | Cross-chain contract addresses verified for Axelar messages |
+| **Trusted Contracts** | Cross-chain contract addresses verified for messenger messages |
 | **Repayment Address** | Relayer's address on source chain where payout is sent |
 | **IntentData** | Struct containing all intent parameters, passed to destination chain |
-| **Fill Hash** | Hash of IntentData used to track fills on destination chain |
+| **Fill Hash** | Hash of IntentData used to track fills and verify integrity on source chain |
+| **IMessengerAdapter** | Interface for messenger adapters (`sendMessage`, `verifyMessage`, `messengerId`) |

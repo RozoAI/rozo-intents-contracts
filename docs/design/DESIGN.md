@@ -2,7 +2,7 @@
 
 Intent-based cross-chain payments. Base ↔ Stellar (bidirectional).
 
-**No custom validators.** Axelar messenger handles verification.
+**Multiple messenger options.** Rozo messenger (default, ~1-3 sec) or Axelar (~5-10 sec). Relayers choose which messenger to use for their repayment. Users receive funds instantly regardless of messenger choice.
 
 ---
 
@@ -30,7 +30,7 @@ Example: `keccak256(abi.encodePacked(uuid))`
 
 ### Timing Rules
 
-- `fillAndNotify()` / `slowFill()` → require `block.timestamp < deadline`
+- `fillAndNotify()` → require `block.timestamp < deadline`
 - `refund()` → require `block.timestamp >= deadline`
 - Near deadline: relayers may skip intent to avoid race with expiry
 
@@ -41,7 +41,7 @@ Example: `keccak256(abi.encodePacked(uuid))`
 | Status | Description |
 |--------|-------------|
 | PENDING | Sender deposited, waiting for fill |
-| FILLED | Fill completed (via `notify()` or `slowFill()`) |
+| FILLED | Fill completed (via `notify()`) |
 | FAILED | Fill verification failed (mismatch in receiver, token, or amount) |
 | REFUNDED | Sender refunded after deadline |
 
@@ -91,23 +91,22 @@ createIntent(sourceAmount, destinationAmount, ...)
 |----------|--------|-------------|
 | `createIntent()` | Sender | Deposit sourceAmount, lock funds. Optionally assign relayer from RFQ. |
 | `notify()` | Messenger only | Confirm fill → FILLED, pay relayer |
-| `slowFill()` | Relayer/Bot | Bridge via CCTP → FILLED directly (EVM only) |
 | `refund()` | Sender or refundAddress | Refund after deadline → REFUNDED |
 
 ### Destination Chain (where receiver gets paid)
 
 | Function | Caller | Description |
 |----------|--------|-------------|
-| `fillAndNotify()` | Relayer | Transfer to receiver + send Axelar message. Includes `repaymentAddress` for cross-chain payout. |
+| `fillAndNotify()` | Relayer | Transfer to receiver + send messenger notification. Includes `repaymentAddress` for cross-chain payout and `messengerId` for messenger selection (0=Rozo default, 1=Axelar). |
 
 ---
 
 ## Flow
 
-### Fast Fill (via Relayer + Axelar)
+### Fast Fill (via Relayer + Messenger)
 
 ```
-Source Chain                 Destination Chain              Axelar
+Source Chain                 Destination Chain              Messenger Network
      │                              │                          │
 1. RFQ Auction (off-chain)          │                          │
    relayer assigned                 │                          │
@@ -115,18 +114,22 @@ Source Chain                 Destination Chain              Axelar
 2. createIntent(relayer)            │                          │
    status = PENDING                 │                          │
      │                              │                          │
-     │                       3. fillAndNotify(intentData, repaymentAddress)
+     │                       3. fillAndNotify(intentData, repaymentAddress, messengerId)
      │                          verify: not already filled     │
      │                          transfer: relayer → receiver   │
-     │                          call Axelar Gateway ──────────►│
+     │                          call messenger adapter ───────►│
      │                              │                          │
-     │                              │              4. Validators verify
+     │                              │              4. Messenger verifies
+     │                              │                 (Rozo: ~1-3 sec)
+     │                              │                 (Axelar: ~5-10 sec)
      │                              │                          │
      │◄─────────────────────────────────────────── 5. notify()
      │                              │                          │
 6. status = FILLED                  │                          │
    pay relayer (repaymentAddress)   │                          │
 ```
+
+**Messenger Selection:** Relayers choose `messengerId` (0=Rozo default, 1=Axelar). Users receive funds instantly regardless of choice.
 
 ### RFQ (Request for Quote) System
 
@@ -165,12 +168,19 @@ The destination chain tracks filled intents using a hash of the full `IntentData
 
 ```solidity
 // Destination chain storage
-mapping(bytes32 => bool) public filledIntents;  // fillHash => filled
+mapping(bytes32 => FillRecord) public filledIntents;  // fillHash => FillRecord
+
+struct FillRecord {
+    address relayer;              // Original relayer on destination
+    bytes32 repaymentAddress;     // Relayer's source chain address
+}
 
 // Fill hash computed from ALL intent parameters
-bytes32 fillHash = keccak256(abi.encode(intentData, block.chainid));
-require(!filledIntents[fillHash], "AlreadyFilled");
-filledIntents[fillHash] = true;
+bytes32 fillHash = keccak256(abi.encode(intentData));
+FillRecord storage fill = filledIntents[fillHash];
+require(fill.relayer == address(0), "AlreadyFilled");
+fill.relayer = msg.sender;
+fill.repaymentAddress = repaymentAddress;
 ```
 
 ### Cross-Chain Repayment Address
@@ -184,9 +194,9 @@ Relayers specify a `repaymentAddress` in `fillAndNotify()` to receive payment on
 ```
 Relayer fills on Stellar (G... address)
     ↓
-fillAndNotify(intentData, repaymentAddress: 0x1234...)
+fillAndNotify(intentData, repaymentAddress: 0x1234..., messengerId: 0)
     ↓
-Axelar message includes repaymentAddress
+Messenger (Rozo or Axelar) carries repaymentAddress
     ↓
 notify() on Base pays 0x1234... (relayer's EVM address)
 ```
@@ -198,26 +208,7 @@ notify() on Base pays 0x1234... (relayer's EVM address)
 | Intent already filled on destination | Transaction reverts with "AlreadyFilled" |
 | `fillAndNotify()` succeeds but `notify()` fails verification | Intent set to FAILED, admin investigates |
 | Relayer never fills | Intent stays PENDING until deadline, then sender refunds |
-
-### Slow Fill (via CCTP Bridge, EVM only)
-
-```
-Source Chain (EVM)           CCTP                    Destination (EVM)
-     │                          │                          │
-1. createIntent()               │                          │
-   status = PENDING             │                          │
-     │                          │                          │
-2. slowFill()                   │                          │
-   deduct fee                   │                          │
-   call bridge adapter ────────►│                          │
-     │                          │                          │
-3. status = FILLED              │                          │
-     │                          │                          │
-     │                    ~1-60 min                        │
-     │                          │                          │
-     │                    CCTP mint ──────────────────────►│
-     │                          │                   receiver gets funds
-```
+| Messenger fails to deliver | Relayer uses `retryNotify(intentData, newMessengerId)` to resend the notification. |
 
 ---
 
@@ -232,8 +223,9 @@ withdrawFees(token)       // feeRecipient withdraws accumulated fees
 
 ### Relayer Management
 ```solidity
-addRelayer(address)
-removeRelayer(address)
+enum RelayerType { NONE, ROZO, EXTERNAL }
+addRelayer(address relayer, RelayerType relayerType)
+removeRelayer(address relayer)
 ```
 
 ### Intent Recovery (for FAILED status)
@@ -251,25 +243,8 @@ adminRefund(bytes32 intentId)
 ### Cross-Chain Configuration
 ```solidity
 setTrustedContract(string chainName, string contractAddress)
-setMessenger(address messenger, bool allowed)
+setMessengerAdapter(IMessengerAdapter adapter)  // Auto-registers by messengerId from adapter
 ```
-
----
-
-## Fast vs Slow Fill
-
-| Mode | Function | Speed | Status Flow | Relayer Profit |
-|------|----------|-------|-------------|----------------|
-| Fast | `fillAndNotify()` + `notify()` | ~5-10 sec | PENDING → FILLED | Yes (spread) |
-| Slow | `slowFill()` | ~1-60 min | PENDING → FILLED | No (service only) |
-
-**Fast Fill:** Relayer pays on destination, gets repaid on source (earns spread).
-
-**Slow Fill:** CCTP bridges funds directly to receiver. Fee deducted before burn. No relayer profit - it's a fallback service. Bypasses RozoIntents on destination chain entirely.
-
-**⚠️ SlowFill Warning:** Once `slowFill()` succeeds (CCTP burn completes), **no refund is possible via RozoIntents**. If CCTP mint stalls, user must claim refund directly from CCTP using their `refundAddress`.
-
-See [SLOWFILLED.md](./SLOWFILLED.md) for full details.
 
 ---
 
@@ -318,8 +293,9 @@ If contract changes are needed:
 | Intent state, funds | On-chain |
 | RFQ auction | Off-chain (WebSocket server) |
 | Relayer monitoring | Off-chain indexer |
-| Fill verification | Axelar (75+ validators) |
+| Fill verification | Messenger network (Rozo ~1-3 sec, Axelar ~5-10 sec) |
 | Fill tracking (destination) | On-chain (filledIntents mapping) |
+| Messenger selection | Relayer choice (messengerId parameter) |
 
 ---
 
@@ -377,17 +353,6 @@ let bytes32_addr: BytesN<32> = stellar_addr.to_bytes();
 let addr: Address = Address::from_bytes(&bytes32_addr);
 ```
 
-### Fill Mode Support
-
-| Route | Fast Fill | Slow Fill |
-|-------|-----------|-----------|
-| Base ↔ Stellar | Yes | No (CCTP doesn't support Stellar yet) |
-| EVM ↔ EVM | Yes | Yes (via CCTP) |
-
-**Fast Fill:** Works on all routes via Axelar messaging.
-
-**Slow Fill:** Only EVM ↔ EVM routes where CCTP is supported. Bypasses destination contract - funds go directly to receiver.
-
 ---
 
 ## See Also
@@ -396,7 +361,6 @@ let addr: Address = Address::from_bytes(&bytes32_addr);
 - [FUND_FLOW.md](./FUND_FLOW.md) - Fund movement & fees
 - [GLOSSARY.md](./GLOSSARY.md) - Terms and supported chains
 - [MESSENGER_DESIGN.md](./MESSENGER_DESIGN.md) - Messenger interface & Axelar
-- [SLOWFILLED.md](./SLOWFILLED.md) - SlowFill bridge fallback details
 - [DATA_STRUCTURES.md](./DATA_STRUCTURES.md) - Intent struct, events, errors
 
 ### Development

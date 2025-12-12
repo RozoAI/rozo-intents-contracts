@@ -117,13 +117,13 @@ User                    RFQ Server              Relayers            Source Chain
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | **Auction Window** | 3 seconds | Time for relayers to submit bids |
-| **Fulfillment Threshold** | 10 seconds | Maximum time for winning relayer to call `fillAndNotify()` |
-| **Rozo Relayer Fallback** | After 10s | If no fulfillment, Rozo relayer executes the fill |
+| **Fulfillment Threshold** | 10 seconds | The time window (`rozoRelayerThreshold`) for the assigned relayer to call `fillAndNotify()`. |
+| **Rozo Relayer Fallback** | After 10s | If the assigned relayer fails to fulfill, the designated `rozoRelayer` is permitted by the contract to execute the fill. This is enforced on-chain by checking `block.timestamp > intentData.createdAt + rozoRelayerThreshold`. |
 
 **Relayer Requirements:**
 - Relayers must deposit funds to be whitelisted
-- Winning an auction creates a commitment to fulfill within 10 seconds
-- **Penalty:** If a relayer wins an auction but fails to fulfill within 10 seconds (triggering Rozo relayer fallback), they are penalized from their deposited funds
+- Winning an auction creates a commitment to fulfill within the `rozoRelayerThreshold`
+- **Penalty:** If a relayer wins an auction but fails to fulfill within the `rozoRelayerThreshold` (triggering the Rozo relayer fallback), they are penalized from their deposited funds
 
 **Why deposits and penalties?**
 - Ensures fast fulfillment (10-second guarantee)
@@ -139,31 +139,22 @@ User                    RFQ Server              Relayers            Source Chain
 2. Relayers submit bids during auction window
 3. User accepts best quote, calls createIntent(relayer = winning_relayer)
 4. Assigned relayer sees IntentCreated event (or via Rozo API)
-5. Relayer calls fillAndNotify(intentData, repaymentAddress) on Stellar
+5. Relayer calls fillAndNotify(intentData, repaymentAddress, messengerId) on Stellar
    └── Contract verifies relayer matches intentData.relayer
    └── Contract verifies intent not already filled (filledIntents mapping)
    └── Contract transfers tokens: relayer → receiver
-   └── Contract calls Axelar Gateway with payment proof
-6. Axelar validators verify the Stellar contract event
-7. Axelar delivers → notify() on Base → status = FILLED, relayer paid to repaymentAddress
+   └── Contract calls selected messenger adapter
+6. Messenger verifies the Stellar contract event
+   └── Rozo: ~1-3 seconds (Rozo relayer network)
+   └── Axelar: ~5-10 seconds (75+ validators)
+7. Messenger delivers → notify() on Base → status = FILLED, relayer paid to repaymentAddress
 ```
 
 **Important:**
 - Relayer must pass full `IntentData` struct to `fillAndNotify()`
 - Contract verifies `msg.sender` matches `intentData.relayer` (if assigned intent)
 - `repaymentAddress` specifies where to receive payout on source chain
-
-## Slow Fill Flow (EVM ↔ EVM only)
-
-**Note:** SlowFill only works for EVM ↔ EVM routes (CCTP). Base ↔ Stellar uses Fast Fill only.
-
-```
-Example: Base → Arbitrum
-1. Sender creates intent on Base (funds locked, status = PENDING)
-2. Relayer/bot calls slowFill() on RozoIntentsBase
-3. Contract deducts fee, calls CCTP burn → status = FILLED
-4. CCTP mints directly to receiver on Arbitrum
-```
+- `messengerId` specifies which messenger to use (0=Rozo default, 1=Axelar)
 
 ## Functions
 
@@ -172,7 +163,6 @@ Example: Base → Arbitrum
 | Function | Caller | Result |
 |----------|--------|--------|
 | `createIntent()` | Sender | → PENDING (with optional relayer assignment) |
-| `slowFill()` | Relayer | PENDING → FILLED (bridge path, no relayer profit) |
 | `notify()` | Messenger | PENDING → FILLED (relayer paid to repaymentAddress) |
 | `refund()` | Sender/refundAddress | PENDING → REFUNDED (after deadline) |
 
@@ -180,7 +170,8 @@ Example: Base → Arbitrum
 
 | Function | Caller | Result |
 |----------|--------|--------|
-| `fillAndNotify()` | Relayer | Pay receiver, send Axelar message with repaymentAddress |
+| `fillAndNotify()` | Relayer | Pay receiver, send messenger notification with repaymentAddress and messengerId |
+| `retryNotify()` | Original Relayer | Resend notification with a different messenger if the first one fails |
 
 ---
 
@@ -254,18 +245,31 @@ Relayer Workflow:
    ├── Build IntentData struct from event/API data
    ├── Verify intent not already filled on destination
    ├── Verify deadline hasn't passed
-   └── Calculate if fill is profitable
+   ├── Calculate if fill is profitable
+   └── Choose messenger (0=Rozo for speed, 1=Axelar for decentralization)
 
 3. APPROVE (if not already done)
    └── token.approve(RozoIntentsDestination, amount)
 
 4. FILL
-   └── fillAndNotify(intentData, repaymentAddress)
+   └── fillAndNotify(intentData, repaymentAddress, messengerId)
        - repaymentAddress = your source chain address
+       - messengerId = 0 (Rozo, default) or 1 (Axelar)
 
-5. RECEIVE PAYMENT (~5-10 seconds)
+5. RECEIVE PAYMENT
+   ├── Rozo: ~1-3 seconds (faster capital cycling)
+   └── Axelar: ~5-10 seconds (decentralized verification)
    └── notify() on source chain pays to repaymentAddress
 ```
+
+### Messenger Selection Guide
+
+| Messenger | ID | Speed | Best For |
+|-----------|-------|-------|----------|
+| Rozo (default) | 0 | ~1-3 sec | Standard fills, faster capital cycling |
+| Axelar | 1 | ~5-10 sec | Relayers preferring decentralized verification |
+
+**Note:** Users receive funds instantly regardless of messenger choice. Messenger only affects relayer repayment speed.
 
 ### IntentData Struct
 
@@ -296,7 +300,8 @@ struct IntentData {
 | RFQ auction | Off-chain (WebSocket server) |
 | Relayer monitoring | Off-chain indexer / Rozo API |
 | Stellar payment | Stellar ledger |
-| Fill confirmation | Axelar message (verified by 75+ validators) |
+| Fill confirmation | Messenger (Rozo: ~1-3 sec, Axelar: ~5-10 sec) |
+| Messenger selection | Relayer choice (messengerId parameter) |
 | Settlement | On-chain notify() |
 
 ---
@@ -310,6 +315,7 @@ struct IntentData {
 | `IntentExpired` | Deadline passed | Cannot fill; user will refund |
 | `NotRelayer` | Not whitelisted | Contact admin to whitelist your address |
 | `WrongChain` | Wrong destination chain | Check `intentData.destinationChainId` |
+| `InvalidMessenger` | Invalid messengerId | Use 0 (Rozo) or 1 (Axelar) |
 
 ---
 
@@ -324,7 +330,7 @@ struct IntentData {
 ## Admin Functions
 
 ```solidity
-function addRelayer(address relayer) external onlyOwner;
+function addRelayer(address relayer, RelayerType relayerType) external onlyOwner;
 function removeRelayer(address relayer) external onlyOwner;
 ```
 
@@ -333,11 +339,12 @@ function removeRelayer(address relayer) external onlyOwner;
 | Risk | Mitigation |
 |------|-----------|
 | Relayer doesn't complete | Sender refunds after deadline |
-| Relayer fills wrong amount | Axelar verifies actual payment |
-| Fake fillAndNotify | Only Messenger can call notify() |
+| Relayer fills wrong amount | `fillHash` verification ensures all parameters match |
+| Fake fillAndNotify | Only registered messenger adapters can call notify() |
 | Double-fill attack | `filledIntents` mapping prevents duplicates |
 | Wrong relayer fills | `intentData.relayer` verification on destination |
 | Cross-chain address mismatch | `repaymentAddress` parameter |
+| Messenger fails to deliver | Use `retryNotify(fillHash, messengerId)`. See [Messenger Failure](../design/MESSENGER_DESIGN.md#concern-messenger-failure) |
 
 ---
 

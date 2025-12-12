@@ -64,9 +64,9 @@ rozoIntents.setChainIdToAxelarName(42161, "arbitrum"); // Arbitrum (if needed)
 rozoIntents.setTrustedContract("stellar", "STELLAR_CONTRACT_ADDRESS");
 rozoIntents.setTrustedContract("arbitrum", "0x...");
 
-// 6. Add relayers
-rozoIntents.addRelayer(relayerAddress1);
-rozoIntents.addRelayer(relayerAddress2);
+# Add relayers with their types
+rozoIntents.addRelayer(rozoRelayerAddress, 1);      // 1 = ROZO
+rozoIntents.addRelayer(externalRelayerAddress, 2); // 2 = EXTERNAL
 ```
 
 **Important:** Step 4 (`setChainIdToAxelarName`) is required for `fillAndNotify()` to route messages correctly. Without this mapping, cross-chain messages will fail.
@@ -147,8 +147,10 @@ soroban contract invoke --id $CONTRACT_ID -- set_chain_id_to_axelar_name --chain
 soroban contract invoke --id $CONTRACT_ID -- set_trusted_contract --chain "base" --address "0x..."
 
 # ============ Relayer Management ============
-# Add relayers (must be whitelisted on BOTH chains)
-soroban contract invoke --id $CONTRACT_ID -- add_relayer --relayer $RELAYER_ADDRESS
+# Add relayers with their types (must be whitelisted on BOTH chains)
+# RelayerType: 0=NONE, 1=ROZO, 2=EXTERNAL
+soroban contract invoke --id $CONTRACT_ID -- add_relayer --relayer $ROZO_RELAYER_ADDRESS --relayer_type 1
+soroban contract invoke --id $CONTRACT_ID -- add_relayer --relayer $EXTERNAL_RELAYER_ADDRESS --relayer_type 2
 ```
 
 ### Stellar-Specific Configuration Notes
@@ -191,37 +193,6 @@ Stellar Contract:
 
 ---
 
-## SlowFill Bridge Configuration (EVM only)
-
-### 1. Deploy Bridge Adapter
-
-```bash
-forge create src/adapters/CCTPAdapter.sol:CCTPAdapter \
-  --constructor-args $CCTP_TOKEN_MESSENGER_ADDRESS
-```
-
-### 2. Configure Routes
-
-```solidity
-// Enable Base → Arbitrum USDC route
-rozoIntents.setSlowFillBridge(
-    42161,                              // Arbitrum chain ID
-    BASE_USDC_ADDRESS,                  // source token
-    bytes32(uint256(uint160(ARB_USDC))), // destination token
-    CCTP_ADAPTER_ADDRESS                // bridge adapter
-);
-```
-
-### CCTP Token Messenger Addresses
-
-| Chain | Token Messenger |
-|-------|-----------------|
-| Base | `0x1682Ae6375C4E4A97e4B583BC394c861A46D8962` |
-| Arbitrum | `0x19330d10D9Cc8751218eaf51E8885D058642E08A` |
-| Ethereum | `0xBd3fa81B58Ba92a82136038B25aDec7066af3155` |
-
----
-
 ## Verification
 
 ### Verify Deployment
@@ -257,7 +228,6 @@ cast call $CONTRACT_ADDRESS "trustedContracts(string)(string)" "stellar"
 - [ ] **Chain ID to Axelar name mapping configured** (`setChainIdToAxelarName`)
 - [ ] Trusted contracts configured for all supported chains
 - [ ] Relayers whitelisted on both source and destination chains
-- [ ] SlowFill bridges configured (if applicable)
 - [ ] Test transaction completed successfully
 
 ---

@@ -165,14 +165,18 @@ pub fn notify(
 ### Destination Chain Functions (Stellar as destination)
 
 ```rust
-// Relayer pays receiver and sends Axelar message
 pub fn fill_and_notify(
     env: Env,
-    intent_id: BytesN<32>,
-    receiver: Address,               // Stellar receiver
-    token: Address,                  // Stellar token contract
-    amount: i128,
-    source_chain_id: u64,            // e.g., 8453 for Base
+    intent_data: IntentData,
+    repayment_address: BytesN<32>,
+    messenger_id: u8
+) -> Result<(), Error>;
+
+// Relayer retries sending notification if initial messenger fails
+pub fn retry_notify(
+    env: Env,
+    intent_data: IntentData,
+    messenger_id: u8
 ) -> Result<(), Error>;
 ```
 
@@ -296,6 +300,8 @@ Messages between chains use **Solidity ABI encoding** format. Each value must oc
 
 ### Encoding Payload (Stellar → EVM)
 
+This function encodes the `notify` payload to match Solidity's `abi.encode` format, which is required for the EVM contract to decode it correctly.
+
 ```rust
 use soroban_sdk::{Bytes, BytesN, Env};
 
@@ -303,83 +309,50 @@ use soroban_sdk::{Bytes, BytesN, Env};
 /// i128 is 16 bytes, must left-pad with 16 zero bytes
 fn i128_to_abi_bytes(env: &Env, value: i128) -> Bytes {
     let mut result = Bytes::new(env);
-
-    // Left-pad with 16 zero bytes (to make 32 bytes total)
-    for _ in 0..16 {
-        result.push_back(0u8);
-    }
-
-    // Append 16-byte big-endian representation
-    let be_bytes = value.to_be_bytes(); // [u8; 16]
-    for byte in be_bytes {
-        result.push_back(byte);
-    }
-
-    result  // Now exactly 32 bytes
+    for _ in 0..16 { result.push_back(0u8); } // Left-pad with 16 zeros
+    for byte in value.to_be_bytes() { result.push_back(byte); }
+    result
 }
 
 /// Encode notify payload matching Solidity's abi.encode format
-/// Total: 5 × 32 = 160 bytes
+/// intentId, fillHash, repaymentAddress, relayer
+/// Total: 4 * 32 = 128 bytes
 fn encode_notify_payload(
     env: &Env,
     intent_id: BytesN<32>,
-    amount_paid: i128,
-    relayer: BytesN<32>,
-    receiver: BytesN<32>,
-    destination_token: BytesN<32>,
+    fill_hash: BytesN<32>,
+    repayment_address: BytesN<32>,
+    relayer: BytesN<32>
 ) -> Bytes {
     let mut payload = Bytes::new(env);
 
-    // Each field must be exactly 32 bytes
-    payload.append(&Bytes::from_slice(env, &intent_id.to_array()));  // 32 bytes
-    payload.append(&i128_to_abi_bytes(env, amount_paid));            // 32 bytes (padded)
-    payload.append(&Bytes::from_slice(env, &relayer.to_array()));    // 32 bytes
-    payload.append(&Bytes::from_slice(env, &receiver.to_array()));   // 32 bytes
-    payload.append(&Bytes::from_slice(env, &destination_token.to_array())); // 32 bytes
+    // Each field must be exactly 32 bytes (Solidity ABI encoding)
+    payload.append(&Bytes::from_slice(env, &intent_id.to_array()));
+    payload.append(&Bytes::from_slice(env, &fill_hash.to_array()));
+    payload.append(&Bytes::from_slice(env, &repayment_address.to_array()));
+    payload.append(&Bytes::from_slice(env, &relayer.to_array()));
 
-    // Total: 160 bytes
     payload
 }
 ```
 
 ### Decoding Payload (EVM → Stellar)
 
-```rust
-/// Decode 32-byte big-endian to i128
-/// Takes last 16 bytes (ignores left-padding zeros)
-fn abi_bytes_to_i128(bytes: &[u8]) -> i128 {
-    // bytes is 32 bytes, take last 16 for i128
-    let mut arr = [0u8; 16];
-    arr.copy_from_slice(&bytes[16..32]);
-    i128::from_be_bytes(arr)
-}
+This is the reverse process for when Stellar is the source chain and needs to decode a payload sent from an EVM chain.
 
+```rust
 /// Decode payload from EVM's abi.encode format
-/// Payload must be exactly 160 bytes (5 × 32)
-fn decode_notify_payload(env: &Env, payload: &Bytes) -> Result<NotifyPayload, Error> {
-    // Verify payload length
-    if payload.len() != 160 {
+fn decode_payload(env: &Env, payload: &Bytes) -> Result<(BytesN<32>, BytesN<32>, BytesN<32>, BytesN<32>), Error> {
+    if payload.len() != 128 {
         return Err(Error::InvalidPayloadLength);
     }
 
-    // Extract 32-byte chunks
     let intent_id = BytesN::from_slice(env, &payload.slice(0..32).to_array());
+    let fill_hash = BytesN::from_slice(env, &payload.slice(32..64).to_array());
+    let repayment_address = BytesN::from_slice(env, &payload.slice(64..96).to_array());
+    let relayer = BytesN::from_slice(env, &payload.slice(96..128).to_array());
 
-    // Amount: 32 bytes, but only last 16 bytes contain i128 value
-    let amount_bytes: [u8; 32] = payload.slice(32..64).to_array();
-    let amount_paid = abi_bytes_to_i128(&amount_bytes);
-
-    let relayer = BytesN::from_slice(env, &payload.slice(64..96).to_array());
-    let receiver = BytesN::from_slice(env, &payload.slice(96..128).to_array());
-    let dest_token = BytesN::from_slice(env, &payload.slice(128..160).to_array());
-
-    Ok(NotifyPayload {
-        intent_id,
-        amount_paid,
-        relayer,
-        receiver,
-        destination_token: dest_token,
-    })
+    Ok((intent_id, fill_hash, repayment_address, relayer))
 }
 ```
 
@@ -388,13 +361,12 @@ fn decode_notify_payload(env: &Env, payload: &Bytes) -> Result<NotifyPayload, Er
 ```
 Offset    Field              Size     Notes
 ──────────────────────────────────────────────────────
-0-31      intentId           32       bytes32, no padding needed
-32-63     amountPaid         32       uint256, i128 left-padded with 16 zeros
-64-95     relayer            32       bytes32, no padding needed
-96-127    receiver           32       bytes32, no padding needed
-128-159   destinationToken   32       bytes32, no padding needed
+0-31      intentId           32       bytes32
+32-63     fillHash           32       bytes32
+64-95     repaymentAddress   32       bytes32
+96-127    relayer      32       bytes32
 ──────────────────────────────────────────────────────
-Total:                       160 bytes
+Total:                       128 bytes
 ```
 
 ### Verification Example
@@ -408,13 +380,12 @@ fn test_payload_encoding() {
     let payload = encode_notify_payload(
         &env,
         BytesN::from_array(&env, &[1u8; 32]),  // intentId
-        1000_0000000i128,                       // 1000 USDC (7 decimals)
-        BytesN::from_array(&env, &[2u8; 32]),  // relayer
-        BytesN::from_array(&env, &[3u8; 32]),  // receiver
-        BytesN::from_array(&env, &[4u8; 32]),  // destToken
+        BytesN::from_array(&env, &[2u8; 32]),  // fillHash
+        BytesN::from_array(&env, &[3u8; 32]),  // repaymentAddress
+        BytesN::from_array(&env, &[4u8; 32]),  // relayer
     );
 
-    assert_eq!(payload.len(), 160);  // Must be exactly 160 bytes
+    assert_eq!(payload.len(), 128);  // Must be exactly 128 bytes (4 * 32)
 }
 ```
 
