@@ -457,15 +457,15 @@ function fillAndNotify(
     uint8 messengerId
 ) external onlyWhitelistedRelayer {
     // 1. Verify we're on the correct destination chain
-    require(intentData.destinationChainId == block.chainid, "WrongChain");
+    if (intentData.destinationChainId != block.chainid) revert WrongChain();
 
     // 2. Optional: Check deadline hasn't passed
-    require(block.timestamp <= intentData.deadline, "IntentExpired");
+    if (block.timestamp > intentData.deadline) revert IntentExpired();
 
     // 3. Verify caller is assigned relayer (if intent has one)
     if (intentData.relayer != bytes32(0)) {
         bytes32 callerBytes32 = bytes32(uint256(uint160(msg.sender)));
-        require(callerBytes32 == intentData.relayer, "NotAssignedRelayer");
+        if (callerBytes32 != intentData.relayer) revert NotAssignedRelayer();
     }
     // If relayer is bytes32(0), any whitelisted relayer can fill
 
@@ -473,8 +473,10 @@ function fillAndNotify(
     bytes32 fillHash = keccak256(abi.encode(intentData));
 
     // 5. Check if already filled (prevents double-fill attacks)
-    require(!filledIntents[fillHash], "AlreadyFilled");
-    filledIntents[fillHash] = true;
+    FillRecord storage fill = filledIntents[fillHash];
+    if (fill.relayer != address(0)) revert AlreadyFilled();
+    fill.relayer = msg.sender;
+    fill.repaymentAddress = repaymentAddress;
 
     // 6. Convert bytes32 to address for destination chain operations
     address receiver = address(uint160(uint256(intentData.receiver)));
@@ -485,7 +487,7 @@ function fillAndNotify(
 
     // 8. Get messenger adapter
     IMessengerAdapter adapter = messengerAdapters[messengerId];
-    require(address(adapter) != address(0), "InvalidMessenger");
+    if (address(adapter) == address(0)) revert InvalidMessenger();
 
     // 9. Build payload (4 parameters: intentId, fillHash, repaymentAddress, relayer)
     bytes32 actualRelayer = bytes32(uint256(uint160(msg.sender)));
@@ -526,11 +528,11 @@ function retryNotify(
 
     // 2. Verify the fill exists and the caller is the original relayer
     FillRecord storage fill = filledIntents[fillHash];
-    require(fill.relayer == msg.sender, "NotRelayer");
+    if (fill.relayer != msg.sender) revert NotRelayer();
 
     // 3. Get the new messenger adapter
     IMessengerAdapter adapter = messengerAdapters[messengerId];
-    require(address(adapter) != address(0), "InvalidMessenger");
+    if (address(adapter) == address(0)) revert InvalidMessenger();
 
     // 4. Build the payload again
     bytes32 actualRelayer = bytes32(uint256(uint160(msg.sender)));
@@ -568,8 +570,8 @@ function notify(
 ) external {
     // 1. Get and verify messenger adapter
     IMessengerAdapter adapter = messengerAdapters[messengerId];
-    require(address(adapter) != address(0), "InvalidMessenger");
-    require(msg.sender == address(adapter), "NotMessenger");
+    if (address(adapter) == address(0)) revert InvalidMessenger();
+    if (msg.sender != address(adapter)) revert NotMessenger();
 
     // 2. Adapter verifies and decodes message
     bytes memory payload = adapter.verifyMessage(sourceChainId, messageData);
@@ -581,7 +583,7 @@ function notify(
     Intent storage intent = intents[intentId];
 
     // 4. Status must be PENDING
-    require(intent.status == IntentStatus.PENDING, "InvalidStatus");
+    if (intent.status != IntentStatus.PENDING) revert InvalidStatus(intent.status, IntentStatus.PENDING);
 
     // 5. Recompute expected fillHash from stored intent data
     bytes32 expectedFillHash = _computeFillHash(intent);
@@ -969,45 +971,103 @@ event IntentRelayerChanged(
 
 ## Error Codes
 
+### Core Protocol Errors
+
 ```solidity
+// ============ Intent State Errors ============
 error IntentAlreadyExists();
 error IntentNotFound();
 error InvalidStatus(IntentStatus current, IntentStatus expected);
 error IntentExpired();
 error IntentNotExpired();
+
+// ============ Access Control Errors ============
 error NotRelayer();
 error NotAssignedRelayer();
+error NotAuthorizedRelayer();
 error NotMessenger();
+
+// ============ Cross-Chain & Messenger Errors ============
 error InvalidMessenger();
+error UntrustedSource();
+error WrongChain();
+
+// ============ Fill & Payment Errors ============
+error AlreadyFilled();
 error FillHashMismatch();
 error InsufficientAmount(uint256 paid, uint256 required);
 error TransferFailed();
+
+// ============ Fee & Configuration Errors ============
 error InvalidFee();
-error UntrustedSource();
-error WrongChain();
-error AlreadyFilled();
 ```
 
-### Error Reference Guide
+### Error Categories & Reference
 
-| Error | When Triggered | How to Debug |
-|-------|----------------|--------------|
-| `IntentAlreadyExists` | `createIntent()` with duplicate intentId | Generate new unique intentId |
-| `IntentNotFound` | Any function with non-existent intentId | Check intentId is correct, check correct chain |
-| `InvalidStatus` | Function called on wrong status | Check current status via `intents[id].status` |
-| `IntentExpired` | `fillAndNotify()` after deadline | Intent can only be refunded now |
-| `IntentNotExpired` | `refund()` before deadline | Wait until `block.timestamp >= deadline` |
-| `NotRelayer` | Non-whitelisted address calls relayer function | Check `relayers[address]` mapping is not `NONE` |
-| `NotAuthorizedRelayer` | Wrong relayer tries to fill assigned intent | Only assigned relayer or ROZO fallback can fill; check `intentData.relayer` |
-| `NotMessenger` | Non-messenger adapter calls `notify()` | Only registered messenger adapters can call |
-| `InvalidMessenger` | Invalid messengerId in `fillAndNotify()` | Use valid messengerId (0=Rozo, 1=Axelar) |
-| `FillHashMismatch` | Fill hash doesn't match expected | Intent parameters were tampered; admin investigates |
-| `InsufficientAmount` | `amountPaid < destinationAmount` | Relayer must pay at least destinationAmount |
-| `TransferFailed` | Token transfer reverts | Check token balance, allowance, or token contract |
-| `InvalidFee` | `setProtocolFee()` with fee > 30 bps | Fee must be <= 30 (0.3%) |
-| `UntrustedSource` | `notify()` from untrusted contract | Check `trustedContracts[chainName]` |
-| `WrongChain` | `fillAndNotify()` on wrong destination chain | Check `intentData.destinationChainId` matches |
-| `AlreadyFilled` | `fillAndNotify()` for already-filled intent | Intent already filled, check `filledIntents` |
+#### Intent State Errors
+
+| Error | Function | When Triggered | How to Fix |
+|-------|----------|----------------|-----------|
+| `IntentAlreadyExists` | `createIntent()` | Duplicate intentId submitted | Generate unique intentId using `keccak256(abi.encodePacked(uuid))` |
+| `IntentNotFound` | Any intent function | Non-existent intentId | Verify intentId is correct, check correct chain |
+| `InvalidStatus` | `notify()` | Intent not in PENDING state | Check `intent.status` - must be PENDING for notify() to work |
+| `IntentExpired` | `fillAndNotify()` | `block.timestamp > deadline` | Intent deadline passed, relayer cannot fill |
+| `IntentNotExpired` | `refund()` | `block.timestamp < deadline` | Wait until deadline passes before requesting refund |
+
+#### Access Control Errors
+
+| Error | Function | When Triggered | Root Cause | How to Fix |
+|-------|----------|----------------|-----------|-----------|
+| `NotRelayer` | `retryNotify()` | `fill.relayer != msg.sender` | Caller is not the original relayer who filled the intent | Only the relayer who called fillAndNotify() can retry |
+| `NotAssignedRelayer` | `fillAndNotify()` | `msg.sender != intentData.relayer` (for assigned intents) | Wrong relayer attempting to fill assigned intent | Only the relayer from RFQ auction can fill assigned intents |
+| `NotAuthorizedRelayer` | `fillAndNotify()` | Neither assigned relayer nor Rozo fallback after threshold | Caller is neither the assigned relayer nor Rozo fallback | Check intentData.relayer; if set, only that relayer (or Rozo after 10s) can fill |
+| `NotMessenger` | `notify()` | `msg.sender != address(adapter)` | Non-messenger contract called notify() | Only registered messenger adapters can call notify() |
+
+#### Cross-Chain & Messenger Errors
+
+| Error | Function | When Triggered | Root Cause | How to Fix |
+|-------|----------|----------------|-----------|-----------|
+| `InvalidMessenger` | `fillAndNotify()`, `retryNotify()` | `messengerAdapters[messengerId] == address(0)` | Invalid or unregistered messenger ID | Use valid messengerId: 0=Rozo (default), 1=Axelar |
+| `UntrustedSource` | Adapter's `verifyMessage()` | Source contract not in trusted list | Message from unauthorized contract | Configure `trustedContracts` mapping for source chain |
+| `WrongChain` | `fillAndNotify()` | `block.chainid != intentData.destinationChainId` | Called on wrong destination chain | Switch RPC to correct destination chain (e.g., Stellar, not Ethereum) |
+
+#### Fill & Payment Errors
+
+| Error | Function | When Triggered | Root Cause | How to Fix |
+|-------|----------|----------------|-----------|-----------|
+| `AlreadyFilled` | `fillAndNotify()` | `filledIntents[fillHash]` already has relayer set | Intent already filled on destination | Check blockchain explorer - intent already executed, cannot fill twice |
+| `FillHashMismatch` | `notify()` (soft revert) | Computed hash ≠ received hash | Intent parameters tampered or modified | Admin investigates and manually recovers (sets intent to FILLED or PENDING) |
+| `InsufficientAmount` | `fillAndNotify()` | Relayer payment < required | Relayer didn't provide enough funds | Increase relayer's payment amount to match `destinationAmount` |
+| `TransferFailed` | `fillAndNotify()` | ERC-20 transfer reverted | Insufficient balance, allowance, or token contract issue | Check token balance, approve contract, or verify token is valid |
+
+#### Fee & Configuration Errors
+
+| Error | Function | When Triggered | How to Fix |
+|-------|----------|----------------|-----------|
+| `InvalidFee` | `setProtocolFee()` | Fee > 30 basis points (0.3%) | Set fee to <= 30 bps |
+
+### Error Scenarios by Use Case
+
+#### Relayer Workflow Error Troubleshooting
+
+| Scenario | Likely Error | Solution |
+|----------|--------------|----------|
+| Intent won't fill on destination | `NotAssignedRelayer` | Verify you're the assigned relayer from RFQ (check `intentData.relayer`) |
+| Intent won't fill on destination | `WrongChain` | Switch RPC to correct destination chain |
+| Intent won't fill on destination | `IntentExpired` | Deadline passed; intent can no longer be filled |
+| Intent won't fill on destination | `AlreadyFilled` | Another relayer already filled it; check blockchain explorer |
+| Intent status stays PENDING on source | `InvalidMessenger` | Use valid messengerId (0=Rozo, 1=Axelar) |
+| Intent status stays PENDING on source | Messenger down | Use `retryNotify()` with alternative messenger |
+| Cannot retry notification | `NotRelayer` | Only original filler can retry; must be same msg.sender as fillAndNotify() |
+| Cannot retry notification | `InvalidMessenger` | Alternative messengerId not registered |
+
+#### Operator/Admin Debugging
+
+| Error | Investigation | Resolution |
+|-------|-------------|------------|
+| Intent in FAILED status | Check `IntentFailed` event for reason | If "FillHashMismatch": parameters may have been tampered; call `setIntentStatus(FILLED)` or `adminRefund()` |
+| Intent stuck PENDING after deadline | Messenger failure or late delivery | Call `retryNotify()` if fill was sent, or `refund()` if never filled |
+| Double-fill detected | Investigate blockchain logs | FillRecord structure prevents this; if seen, indicates separate fills with different parameters
 
 ### Common Debugging Steps
 

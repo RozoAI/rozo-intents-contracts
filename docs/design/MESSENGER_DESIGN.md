@@ -67,6 +67,35 @@ interface IMessengerAdapter {
 - **Type-safe errors**: Adapters use custom errors instead of string reverts
 - **Auto-registration**: Messenger ID pulled from adapter itself
 
+### Adapter-Specific Errors
+
+Each messenger adapter implements its own verification logic and error types:
+
+#### Rozo Adapter Errors
+
+| Error | When Triggered | Verification | How to Fix |
+|-------|----------------|--------------|-----------|
+| `InvalidChainId()` | `sendMessage()` when chainId not trusted | `trustedContracts[destinationChainId] == bytes32(0)` | Configure `setTrustedContract()` for destination chain |
+| `UntrustedSource()` | `verifyMessage()` when source not trusted | Source contract ≠ `trustedContracts[sourceChainId]` | Admin configures trusted contracts per chain |
+| `InvalidSignature()` | `verifyMessage()` when ECDSA invalid | Recovered signer ≠ `trustedSigner` | Signature must be from configured trusted signer |
+
+#### Axelar Adapter Errors
+
+| Error | When Triggered | Verification | How to Fix |
+|-------|----------------|--------------|-----------|
+| `InvalidChainId()` | `sendMessage()` when chain mapping missing | `chainIdToAxelarName[destinationChainId]` is empty | Configure `setChainMapping()` for Axelar chain name |
+| `UntrustedSource()` | `verifyMessage()` when source mismatch | Source address ≠ `trustedContracts[sourceChain]` | Admin configures trusted contracts per chain |
+| `NotApproved()` | `verifyMessage()` when gateway rejects | `gateway.validateContractCall()` fails (< 75 validator approval) | Message wasn't approved by Axelar validators; wait or retry |
+
+#### Error Comparison: Core Protocol vs Adapter
+
+| Category | Core Protocol | Adapter-Specific |
+|----------|---------------|-----------------|
+| **Definition** | In RozoIntents contract | In IMessengerAdapter implementations |
+| **Scope** | All intents, all messengers | Specific messenger (Rozo, Axelar, etc.) |
+| **Examples** | `InvalidMessenger`, `AlreadyFilled` | `InvalidChainId`, `InvalidSignature`, `NotApproved` |
+| **Recovery** | Handled at protocol level | Each adapter handles its own recovery |
+
 ---
 
 ## Rozo Messenger (Default)
