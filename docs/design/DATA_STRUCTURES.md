@@ -9,11 +9,11 @@ contract RozoIntents {
     mapping(bytes32 => Intent) public intents;
 
     // ============ Access Control ============
-    // Relayer whitelist
-    mapping(address => bool) public relayers;
+    // Relayer registry with type (NONE=0, ROZO=1, EXTERNAL=2)
+    enum RelayerType { NONE, ROZO, EXTERNAL }
+    mapping(address => RelayerType) public relayers;
 
-    // Messenger whitelist (Axelar)
-    mapping(address => bool) public messengers;
+    // Note: Old bool whitelist is OBSOLETE. Use RelayerType for typed relayer management.
 
     // Owner
     address public owner;
@@ -57,8 +57,11 @@ contract RozoIntentsDestination {
     mapping(bytes32 => FillRecord) public filledIntents;
 
     // ============ Access Control ============
-    // Relayer whitelist
-    mapping(address => bool) public relayers;
+    // Relayer registry with type (NONE=0, ROZO=1, EXTERNAL=2)
+    enum RelayerType { NONE, ROZO, EXTERNAL }
+    mapping(address => RelayerType) public relayers;
+
+    // Note: Old bool whitelist is OBSOLETE. Use RelayerType for typed relayer management.
 
     // Trusted contracts per chain
     mapping(string => string) public trustedContracts;
@@ -250,6 +253,16 @@ This ensures:
 | `refundAddress` | `address` | Where to refund if expired (default: sender) | User | Optional |
 | `relayer` | `address` | Assigned relayer from RFQ auction (address(0) for open) | RFQ Server | Optional |
 
+### Auto-Set Fields
+
+The following fields are **NOT passed as parameters** but are set automatically by the contract:
+
+| Field | Type | Set By | Value |
+|-------|------|--------|-------|
+| `createdAt` | `uint64` | Contract | `block.timestamp` at intent creation |
+| `status` | `IntentStatus` | Contract | `PENDING` (initial state) |
+| `sender` | `address` | Contract | `msg.sender` of createIntent() |
+
 ### Notes
 
 - **`intentId`**: Must be unique. Frontend generates as `keccak256(abi.encodePacked(uuid))` or similar.
@@ -258,6 +271,7 @@ This ensures:
 - **`deadline`**: Recommended: 30 minutes to 24 hours from creation. Too short = no relayer fills. Too long = funds locked.
 - **`refundAddress`**: If not provided, defaults to `sender`.
 - **`relayer`**: From RFQ auction. If `address(0)`, any whitelisted relayer can fill (open intent). Destination chain verifies `msg.sender` matches this field.
+- **`createdAt`**: Used for Rozo fallback timing. The `rozoRelayerThreshold` is measured from this timestamp.
 
 ---
 
@@ -316,20 +330,95 @@ FAILED ──► admin setIntentStatus() ──► PENDING (retry)
 
 ## Cross-Chain Address Encoding
 
-### EVM → bytes32
-```solidity
-bytes32 receiver = bytes32(uint256(uint160(evmAddress)));
-```
+All cross-chain addresses use `bytes32` for compatibility. This section provides all conversion patterns in one place.
 
-### bytes32 → EVM
+### Quick Reference
+
+| From | To | Method |
+|------|----|----|
+| EVM address | bytes32 | `bytes32(uint256(uint160(addr)))` |
+| bytes32 | EVM address | `address(uint160(uint256(b32)))` |
+| Stellar G... | bytes32 | Native 32 bytes (strkey decode) |
+| bytes32 | Stellar G... | Native (strkey encode) |
+
+### EVM Address ↔ bytes32
+
 ```solidity
+// ============ Solidity ============
+
+// EVM address → bytes32 (left-pad with zeros)
+bytes32 receiver = bytes32(uint256(uint160(evmAddress)));
+
+// bytes32 → EVM address (take rightmost 20 bytes)
 address evmAddress = address(uint160(uint256(receiver)));
 ```
 
-### Stellar → bytes32
-Stellar addresses (G... public keys) are 32 bytes natively. Use as-is.
+```typescript
+// ============ TypeScript ============
 
-> **For detailed Stellar encoding examples** (strkey decoding, token contracts, JavaScript/Rust code), see [STELLAR.md](./STELLAR.md).
+// EVM address → bytes32
+function evmAddressToBytes32(evmAddress: string): string {
+  return '0x' + evmAddress.slice(2).padStart(64, '0');
+}
+
+// bytes32 → EVM address
+function bytes32ToEvmAddress(bytes32: string): string {
+  return '0x' + bytes32.slice(-40);
+}
+```
+
+### Stellar Address ↔ bytes32
+
+Stellar G... addresses are Ed25519 public keys, already 32 bytes internally.
+
+```typescript
+// ============ TypeScript (stellar-sdk) ============
+import { StrKey } from '@stellar/stellar-sdk';
+
+// Stellar G... address → bytes32
+function stellarAddressToBytes32(gAddress: string): string {
+  const publicKey = StrKey.decodeEd25519PublicKey(gAddress);
+  return '0x' + Buffer.from(publicKey).toString('hex');
+}
+
+// bytes32 → Stellar G... address
+function bytes32ToStellarAddress(bytes32: string): string {
+  const bytes = Buffer.from(bytes32.replace('0x', ''), 'hex');
+  return StrKey.encodeEd25519PublicKey(bytes);
+}
+```
+
+```rust
+// ============ Soroban (Rust) ============
+use soroban_sdk::{Address, BytesN, Env};
+
+// Stellar Address → bytes32
+fn stellar_address_to_bytes32(env: &Env, addr: &Address) -> BytesN<32> {
+    addr.to_bytes()
+}
+
+// bytes32 → Stellar Address
+fn bytes32_to_stellar_address(env: &Env, bytes: &BytesN<32>) -> Address {
+    Address::from_bytes(bytes)
+}
+```
+
+### Common Conversion Examples
+
+```solidity
+// Example: Store EVM sender as bytes32
+bytes32 senderBytes = bytes32(uint256(uint160(msg.sender)));
+
+// Example: Convert bytes32 receiver to address for transfer
+address receiverAddress = address(uint160(uint256(intentData.receiver)));
+IERC20(token).transfer(receiverAddress, amount);
+
+// Example: Compare bytes32 relayer with msg.sender
+bytes32 callerBytes32 = bytes32(uint256(uint160(msg.sender)));
+require(callerBytes32 == intentData.relayer, "NotAssignedRelayer");
+```
+
+> **For detailed Stellar encoding examples** (strkey decoding, token contracts), see [STELLAR.md](./STELLAR.md).
 
 ---
 
@@ -462,12 +551,23 @@ function fillAndNotify(
     // 2. Optional: Check deadline hasn't passed
     if (block.timestamp > intentData.deadline) revert IntentExpired();
 
-    // 3. Verify caller is assigned relayer (if intent has one)
+    // 3. Verify caller authorization
+    // See "Relayer Verification on Destination" section for detailed explanation
+    bytes32 callerBytes32 = bytes32(uint256(uint160(msg.sender)));
+
     if (intentData.relayer != bytes32(0)) {
-        bytes32 callerBytes32 = bytes32(uint256(uint160(msg.sender)));
-        if (callerBytes32 != intentData.relayer) revert NotAssignedRelayer();
+        // Assigned intent - check if caller is assigned relayer OR Rozo fallback
+        bool isAssignedRelayer = (callerBytes32 == intentData.relayer);
+        bool isRozoFallback = (
+            msg.sender == rozoRelayer &&
+            block.timestamp > intentData.createdAt + rozoRelayerThreshold
+        );
+
+        if (!isAssignedRelayer && !isRozoFallback) {
+            revert NotAuthorizedRelayer();
+        }
     }
-    // If relayer is bytes32(0), any whitelisted relayer can fill
+    // If relayer is bytes32(0), any whitelisted relayer can fill (open intent)
 
     // 4. Compute fill hash from ALL intent parameters
     bytes32 fillHash = keccak256(abi.encode(intentData));
@@ -873,7 +973,8 @@ function setProtocolFee(uint256 feeBps) external onlyOwner;  // max 30 bps
 function withdrawFees(address token) external;  // only feeRecipient
 
 // ============ Relayer Management ============
-function addRelayer(address relayer) external onlyOwner;
+// RelayerType: NONE=0, ROZO=1, EXTERNAL=2
+function addRelayer(address relayer, RelayerType relayerType) external onlyOwner;
 function removeRelayer(address relayer) external onlyOwner;
 
 // ============ Cross-Chain Configuration ============
@@ -898,7 +999,7 @@ function adminRefund(bytes32 intentId) external onlyOwner;
 | `setRozoRelayer` | Sets the address of the Rozo fallback relayer | `setRozoRelayer(0x...)` |
 | `setRozoRelayerThreshold` | Sets the fallback time threshold in seconds | `setRozoRelayerThreshold(10)` |
 | `setTrustedContract` | Whitelists remote contracts | `setTrustedContract("stellar", "C...")` |
-| `addRelayer` | Whitelists relayer addresses | `addRelayer(0x...)` |
+| `addRelayer` | Registers relayer with type | `addRelayer(0x..., RelayerType.ROZO)` |
 
 ### Admin Recovery Scenarios
 

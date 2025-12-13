@@ -2,7 +2,7 @@
 
 Intent-based cross-chain payments. Base ↔ Stellar (bidirectional).
 
-No custom validators. Axelar handles verification.
+**Multiple messenger options.** Rozo messenger (default, ~1-3 sec) or Axelar (~5-10 sec). Users receive funds instantly; messenger choice only affects relayer repayment speed.
 
 Architecture supports ERC-20/Soroban tokens. **Currently: USDC only.** Frontend calculates fees upfront.
 
@@ -11,11 +11,16 @@ Architecture supports ERC-20/Soroban tokens. **Currently: USDC only.** Frontend 
 ## Flow
 
 ```
-Sender ──► createIntent() ──► NEW
-                               │
-Relayer ──► fill() ───────────►│──► FILLING
-                               │
-Messenger ──► notify() ────────┴──► FILLED (relayer paid)
+Source Chain                     Destination Chain
+     │                                  │
+Sender ──► createIntent() ──► PENDING   │
+     │                           │      │
+     │                           │   Relayer ──► fillAndNotify()
+     │                           │      │        (pays receiver instantly)
+     │                           │      │
+     │◄──────── Messenger ───────┴──────┘
+     │
+FILLED (relayer repaid)
 ```
 
 ## Documentation
@@ -30,8 +35,7 @@ System architecture and protocol specifications.
 | [GLOSSARY.md](./docs/design/GLOSSARY.md) | Terms, chains, tokens, roles |
 | [FUND_FLOW.md](./docs/design/FUND_FLOW.md) | Fund movement, fees, refunds |
 | [DATA_STRUCTURES.md](./docs/design/DATA_STRUCTURES.md) | Intent struct, events, errors |
-| [MESSENGER_DESIGN.md](./docs/design/MESSENGER_DESIGN.md) | Axelar integration |
-| [SLOWFILLED.md](./docs/design/SLOWFILLED.md) | CCTP bridge fallback |
+| [MESSENGER_DESIGN.md](./docs/design/MESSENGER_DESIGN.md) | Messenger adapters (Rozo, Axelar) |
 | [STELLAR.md](./docs/design/STELLAR.md) | Stellar address/token encoding, Soroban integration |
 
 ### Development
@@ -48,16 +52,16 @@ Implementation guides for developers.
 
 ### Status Flow
 ```
-NEW → FILLING → FILLED
- │       │
- │       └──► FAILED (verification mismatch, admin recovery)
- │
- └──► REFUNDED (after deadline)
+PENDING ──► FILLED (via notify)
+    │
+    ├──► FAILED (verification mismatch, admin recovery)
+    │
+    └──► REFUNDED (after deadline)
 ```
 
 ### Key Points
 
-- **Fast Fill:** Relayer pays receiver, gets repaid via Axelar (~5-10 sec)
-- **Slow Fill:** CCTP bridges directly to receiver (~1-60 min, EVM only)
+- **Instant for users:** Relayer pays receiver immediately on destination chain
+- **Messenger options:** Rozo (~1-3 sec) or Axelar (~5-10 sec) for relayer repayment
 - **Safety:** No fill = sender refunds after deadline, no fund loss
 - **Admin:** Fee management, relayer whitelist, intent recovery

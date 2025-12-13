@@ -130,10 +130,12 @@ const baseAmount = 100_000000n;      // 6 decimals
 
 ## Soroban Contract Interface
 
-### RozoIntents Stellar Functions
+### Source Chain Functions (Stellar as source)
+
+When Stellar is the **source chain** (user deposits on Stellar, receives on EVM):
 
 ```rust
-// Create intent (sender deposits funds)
+// Create intent (sender deposits funds on Stellar)
 pub fn create_intent(
     env: Env,
     intent_id: BytesN<32>,
@@ -145,39 +147,138 @@ pub fn create_intent(
     destination_amount: i128,
     deadline: u64,
     refund_address: Address,
+    relayer: BytesN<32>,             // Assigned relayer or zero for open intent
 ) -> Result<(), Error>;
 
-// Fill intent (relayer claims)
-pub fn fill(env: Env, intent_id: BytesN<32>) -> Result<(), Error>;
-
-// Refund expired intent
+// Refund expired intent (callable after deadline)
 pub fn refund(env: Env, intent_id: BytesN<32>) -> Result<(), Error>;
 
-// Receive notification from Axelar (destination → source)
+// Receive fill notification from messenger (EVM destination → Stellar source)
+// Called by messenger adapter after relayer fills on EVM
 pub fn notify(
     env: Env,
-    source_chain: String,
-    source_address: String,
-    payload: Bytes,
+    messenger_id: u8,
+    source_chain_id: u64,
+    message_data: Bytes,  // Contains payload + adapter-specific verification data
 ) -> Result<(), Error>;
 ```
 
 ### Destination Chain Functions (Stellar as destination)
 
+When Stellar is the **destination chain** (user deposits on EVM, receives on Stellar):
+
 ```rust
+// Relayer pays receiver on Stellar, sends notification back to EVM source
 pub fn fill_and_notify(
     env: Env,
-    intent_data: IntentData,
-    repayment_address: BytesN<32>,
-    messenger_id: u8
+    intent_data: IntentData,       // Full intent data from source chain
+    repayment_address: BytesN<32>, // Relayer's EVM address for payout
+    messenger_id: u8               // 0=Rozo, 1=Axelar
 ) -> Result<(), Error>;
 
 // Relayer retries sending notification if initial messenger fails
 pub fn retry_notify(
     env: Env,
     intent_data: IntentData,
-    messenger_id: u8
+    messenger_id: u8               // Try different messenger
 ) -> Result<(), Error>;
+```
+
+> **Note:** There is no standalone `fill()` function. Relayers must always use `fill_and_notify()` which combines payment and notification in one atomic operation.
+
+### FillRecord Storage (Stellar)
+
+The destination chain stores `FillRecord` to enable messenger retry when the initial notification fails.
+
+```rust
+/// Fill record stored on destination chain for retries
+#[contracttype]
+#[derive(Clone)]
+pub struct FillRecord {
+    pub relayer: Address,              // Who performed the fill (original relayer on destination)
+    pub repayment_address: BytesN<32>, // Where to send payout on source chain
+}
+
+/// Storage key for filled intents
+#[contracttype]
+pub enum DataKey {
+    FilledIntent(BytesN<32>),  // fill_hash => FillRecord
+    // ... other keys
+}
+
+/// Store fill record in fillAndNotify
+fn store_fill_record(env: &Env, fill_hash: BytesN<32>, relayer: Address, repayment_address: BytesN<32>) {
+    let fill_record = FillRecord {
+        relayer: relayer.clone(),
+        repayment_address,
+    };
+    env.storage().persistent().set(&DataKey::FilledIntent(fill_hash), &fill_record);
+}
+
+/// Check if already filled
+fn is_filled(env: &Env, fill_hash: &BytesN<32>) -> bool {
+    env.storage().persistent().has(&DataKey::FilledIntent(fill_hash.clone()))
+}
+
+/// Get fill record for retry
+fn get_fill_record(env: &Env, fill_hash: &BytesN<32>) -> Option<FillRecord> {
+    env.storage().persistent().get(&DataKey::FilledIntent(fill_hash.clone()))
+}
+```
+
+### fillAndNotify Implementation (Stellar)
+
+```rust
+pub fn fill_and_notify(
+    env: Env,
+    intent_data: IntentData,
+    repayment_address: BytesN<32>,
+    messenger_id: u8,
+) -> Result<(), Error> {
+    let relayer = env.invoker();
+
+    // 1. Verify assigned relayer or Rozo fallback
+    let zero_relayer = BytesN::from_array(&env, &[0u8; 32]);
+    if intent_data.relayer != zero_relayer {
+        let caller_bytes = Self::address_to_bytes32(&env, &relayer);
+        let is_assigned = caller_bytes == intent_data.relayer;
+
+        let rozo_relayer = Self::get_rozo_relayer(&env);
+        let threshold = Self::get_rozo_relayer_threshold(&env);
+        let is_rozo_fallback = caller_bytes == rozo_relayer &&
+            env.ledger().timestamp() > intent_data.created_at + threshold;
+
+        if !is_assigned && !is_rozo_fallback {
+            return Err(Error::NotAuthorizedRelayer);
+        }
+    }
+
+    // 2. Compute fill hash and check double-fill
+    let fill_hash = Self::compute_fill_hash(&env, &intent_data);
+    if Self::is_filled(&env, &fill_hash) {
+        return Err(Error::AlreadyFilled);
+    }
+
+    // 3. Store fill record (for retry mechanism)
+    Self::store_fill_record(&env, fill_hash.clone(), relayer.clone(), repayment_address.clone());
+
+    // 4. Transfer tokens to receiver
+    let token_client = token::Client::new(&env, &intent_data.destination_token);
+    token_client.transfer(&relayer, &intent_data.receiver, &intent_data.destination_amount);
+
+    // 5. Send notification via messenger
+    let adapter = Self::get_messenger_adapter(&env, messenger_id)?;
+    let payload = Self::encode_notify_payload(
+        &env,
+        &intent_data.intent_id,
+        &fill_hash,
+        &repayment_address,
+        &Self::address_to_bytes32(&env, &relayer),
+    );
+    adapter.send_message(&env, intent_data.source_chain_id, payload);
+
+    Ok(())
+}
 ```
 
 ---

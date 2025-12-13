@@ -9,8 +9,10 @@ Relayers fill intents by paying on destination chain, then get repaid on source 
 | Setting | Value |
 |---------|-------|
 | Who can relay | Admin-whitelisted addresses only |
-| How to add | Admin calls `addRelayer(address)` on each chain |
+| How to add | Admin calls `addRelayer(address, relayerType)` on each chain |
 | Guarantee/Bond | Off-chain (legal agreement / escrow) |
+
+> **Interested in becoming a relayer?** Contact us at [hi@rozo.ai](mailto:hi@rozo.ai) to learn about requirements and onboarding process.
 
 ## Multi-Chain Address Requirement
 
@@ -120,15 +122,16 @@ User                    RFQ Server              Relayers            Source Chain
 | **Fulfillment Threshold** | 10 seconds | The time window (`rozoRelayerThreshold`) for the assigned relayer to call `fillAndNotify()`. |
 | **Rozo Relayer Fallback** | After 10s | If the assigned relayer fails to fulfill, the designated `rozoRelayer` is permitted by the contract to execute the fill. This is enforced on-chain by checking `block.timestamp > intentData.createdAt + rozoRelayerThreshold`. |
 
-**Relayer Requirements:**
-- Relayers must deposit funds to be whitelisted
+**Relayer Requirements (Current Phase):**
+- Relayers must be admin-whitelisted via `addRelayer(address, RelayerType)`
 - Winning an auction creates a commitment to fulfill within the `rozoRelayerThreshold`
-- **Penalty:** If a relayer wins an auction but fails to fulfill within the `rozoRelayerThreshold` (triggering the Rozo relayer fallback), they are penalized from their deposited funds
+- Off-chain reputation tracking for relayer reliability
 
-**Why deposits and penalties?**
-- Ensures fast fulfillment (10-second guarantee)
-- Requires relayers to be high quality and reliable
-- Prevents gaming the RFQ system
+**Fallback Mechanism:**
+- If assigned relayer fails to fill within threshold, the designated `rozoRelayer` address can fill
+- This ensures users always get fast fulfillment
+
+> **Future:** On-chain deposit/penalty system is planned but not yet implemented. Contact [hi@rozo.ai](mailto:hi@rozo.ai) for current requirements.
 
 ---
 

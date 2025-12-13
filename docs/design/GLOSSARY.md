@@ -65,6 +65,38 @@ Other stablecoins (USDT, etc.) may be added. Exotic tokens technically work but:
 | **Messenger Adapter** | Contract implementing `IMessengerAdapter` interface to support different messengers |
 | **messengerId** | Identifier for messenger selection: 0=Rozo (default), 1=Axelar |
 
+## Rozo Terminology (Important Distinction)
+
+> ⚠️ **Don't confuse these two concepts:**
+
+| Term | What it is | Purpose | When used |
+|------|------------|---------|-----------|
+| **Rozo Messenger** | Cross-chain messaging service | Delivers `notify()` from destination → source | When relayer calls `fillAndNotify(..., messengerId=0)` |
+| **Rozo Relayer** | A **single designated address** | Fallback fill when assigned relayer fails | When `block.timestamp > createdAt + rozoRelayerThreshold` |
+
+### Rozo Messenger (messengerId = 0)
+- **Role:** Fast cross-chain message delivery (~1-3 sec)
+- **How it works:** Rozo-operated network verifies destination chain events and triggers `notify()` on source chain
+- **Alternative:** Axelar (messengerId = 1, ~5-10 sec)
+- **Who chooses:** Relayer (via `messengerId` parameter in `fillAndNotify()`)
+
+### Rozo Relayer (Single Address Fallback)
+- **Role:** Fallback relayer to ensure intents get filled
+- **Storage:** Single address stored in `rozoRelayer` state variable
+- **How it works:** If assigned relayer doesn't fill within `rozoRelayerThreshold` (e.g., 10 sec), the designated `rozoRelayer` address can fill
+- **Configured via:** `setRozoRelayer(address)` and `setRozoRelayerThreshold(uint256)`
+- **Why needed:** Guarantees fast fulfillment even if assigned relayer fails
+
+> **Note:** `RelayerType.ROZO` in the relayer registry is used to identify Rozo-operated relayers for tracking/reporting purposes. The fallback mechanism specifically checks against the single `rozoRelayer` address, not all ROZO-type relayers.
+
+```
+Example flow:
+1. User creates intent with assigned relayer = 0xABC
+2. 0xABC has 10 seconds to fill (rozoRelayerThreshold)
+3. If 0xABC doesn't fill within 10 sec → rozoRelayer (single address) can fill
+4. When filling, relayer chooses messenger (Rozo or Axelar) for repayment
+```
+
 ## Amount Terms
 
 | Term | Description |
@@ -113,11 +145,11 @@ Frontend calculates fees upfront. Sender specifies both amounts when creating in
 | **Quote Bid** | Relayer's price offer for filling an intent |
 | **Auction Window** | Time period for relayers to submit bids (3 seconds) |
 | **Fulfillment Threshold** | The configurable window of time (`rozoRelayerThreshold`, e.g., 10 seconds) during which only the assigned relayer can fulfill an intent. After this period, the Rozo Relayer Fallback is activated. |
-| **Rozo Relayer Fallback** | A capability where any relayer designated with type `ROZO` is contractually permitted to fill an intent if the assigned relayer fails to do so within the `rozoRelayerThreshold`. This provides a decentralized fallback mechanism. |
-| **Relayer Deposit** | Funds deposited by relayers as collateral for whitelisting |
-| **Penalty System** | Relayers who win but fail to fulfill are penalized from their deposits |
+| **Rozo Relayer Fallback** | A capability where the designated `rozoRelayer` address (single address, not all ROZO-type relayers) is permitted to fill an intent if the assigned relayer fails within the `rozoRelayerThreshold`. |
 | **Open Intent** | Intent with `relayer = address(0)`, any whitelisted relayer can fill |
 | **Assigned Intent** | Intent with specific relayer address, only that relayer can fill |
+
+> **Interested in becoming a relayer?** Contact us at [hi@rozo.ai](mailto:hi@rozo.ai) to learn about requirements and onboarding.
 
 ## Security Terms
 

@@ -370,6 +370,18 @@ Destination Chain                                        Source Chain
 - The relayer can choose any registered messenger for the retry.
 - The source chain is protected from double-payment because `notify()` only works on intents in `PENDING` status.
 
+### Edge Case: Both Messengers Fail
+
+If both Rozo (messengerId=0) and Axelar (messengerId=1) fail to deliver the notification:
+
+| Party | Outcome |
+|-------|---------|
+| **User (Sender)** | Calls `refund()` after deadline, recovers full `sourceAmount` |
+| **Relayer** | Loses funds paid on destination chain (absorbed loss) |
+| **User (Receiver)** | Already received funds on destination chain |
+
+This is an **extremely rare scenario** that would require both messenger networks to be simultaneously unavailable. Relayers accept this risk as part of their business model.
+
 ### `retryNotify` Implementation
 
 ```solidity

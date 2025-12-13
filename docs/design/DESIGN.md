@@ -52,10 +52,19 @@ Example: `keccak256(abi.encodePacked(uuid))`
 
 ### FAILED Status
 
-When `notify()` receives a payload that doesn't match the original intent:
-- Receiver address mismatch
-- Destination token mismatch
-- Amount paid < destinationAmount
+When `notify()` receives a payload where the `fillHash` doesn't match the expected hash computed from the stored intent:
+
+```
+Expected fillHash = keccak256(abi.encode(intentData))
+Received fillHash from messenger payload
+
+If expected ≠ received → FAILED
+```
+
+This can happen if:
+- Intent parameters were tampered with on destination chain
+- Wrong intent was filled
+- Cross-chain message corruption
 
 The intent is set to `FAILED`. Admin must manually investigate and can:
 - Change status back to PENDING (allow retry)
@@ -159,6 +168,8 @@ User                    RFQ Server              Relayers            Source Chain
 
 **Open Intents:** If `relayer = address(0)`, any whitelisted relayer can fill. Used when no RFQ bids received.
 
+> **RFQ Server Integration:** The RFQ server is an off-chain component. For API documentation, WebSocket formats, and integration details, contact [hi@rozo.ai](mailto:hi@rozo.ai).
+
 ### Destination Chain Fill Protection
 
 The destination chain tracks filled intents using a hash of the full `IntentData` struct to prevent:
@@ -208,7 +219,10 @@ notify() on Base pays 0x1234... (relayer's EVM address)
 | Intent already filled on destination | Transaction reverts with "AlreadyFilled" |
 | `fillAndNotify()` succeeds but `notify()` fails verification | Intent set to FAILED, admin investigates |
 | Relayer never fills | Intent stays PENDING until deadline, then sender refunds |
-| Messenger fails to deliver | Relayer uses `retryNotify(intentData, newMessengerId)` to resend the notification. |
+| Messenger fails to deliver | Relayer uses `retryNotify(intentData, newMessengerId)` to try different messenger |
+| **Both messengers fail** | Relayer loses funds on destination; sender refunds after deadline on source |
+
+> **Edge Case - Both Messengers Fail:** If `retryNotify()` with both Rozo (messengerId=0) and Axelar (messengerId=1) fails to deliver the notification, the intent remains PENDING on the source chain. After the deadline passes, the sender can call `refund()` to recover their funds. The relayer who filled on the destination chain absorbs the loss. This is an extremely rare scenario.
 
 ---
 
@@ -301,9 +315,17 @@ If contract changes are needed:
 
 ## Token Support
 
-**Any token allowed.** No whitelist required.
+**Contract level:** Any ERC-20/Soroban token allowed. No whitelist required.
 
-Note: If a user creates an intent with an obscure token, it may not be filled by any relayer (relayers choose which intents to fill based on profitability).
+**Current phase:** USDC only. Relayers currently only provide liquidity for USDC pairs.
+
+| Aspect | Status |
+|--------|--------|
+| Contract support | Any token (no whitelist) |
+| Relayer liquidity | USDC only (current phase) |
+| Future expansion | Additional stablecoins planned |
+
+> **Note:** If a user creates an intent with a token that relayers don't support, the intent may never be filled. The user can always refund after the deadline.
 
 ---
 
