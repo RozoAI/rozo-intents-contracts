@@ -1,17 +1,27 @@
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String};
 
 /// Intent Status
+/// PENDING -> FILLED (success) or FAILED (mismatch) or REFUNDED (after deadline)
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum IntentStatus {
-    New,
-    Filling,
-    Filled,
-    Failed,
-    Refunded,
+    Pending,   // Created, waiting for fill
+    Filled,    // Completed (via notify)
+    Failed,    // Fill verification failed (fillHash mismatch)
+    Refunded,  // Sender refunded after deadline
 }
 
-/// Intent Structure
+/// Relayer Type
+/// Used to categorize relayers for access control
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub enum RelayerType {
+    None,      // Not a relayer
+    Rozo,      // Rozo-operated relayer (can fill as fallback)
+    External,  // Third-party relayer
+}
+
+/// Intent Structure (stored on source chain)
 #[derive(Clone, Debug)]
 #[contracttype]
 pub struct Intent {
@@ -25,15 +35,45 @@ pub struct Intent {
     pub receiver: BytesN<32>,
     pub destination_amount: i128,
     pub deadline: u64,
+    pub created_at: u64,               // Timestamp when intent was created (for Rozo fallback)
     pub status: IntentStatus,
-    pub relayer: Option<Address>,
+    pub relayer: BytesN<32>,           // Assigned relayer (bytes32 for cross-chain compatibility)
+}
+
+/// Intent Data Structure (passed to fillAndNotify)
+/// Full intent data for cross-chain verification
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct IntentData {
+    pub intent_id: BytesN<32>,
+    pub sender: BytesN<32>,
+    pub refund_address: BytesN<32>,
+    pub source_token: BytesN<32>,
+    pub source_amount: i128,
+    pub source_chain_id: u64,
+    pub destination_chain_id: u64,
+    pub destination_token: BytesN<32>,
+    pub receiver: BytesN<32>,
+    pub destination_amount: i128,
+    pub deadline: u64,
+    pub created_at: u64,
+    pub relayer: BytesN<32>,
+}
+
+/// Fill Record Structure
+/// Tracks fills on destination chain for double-fill prevention and retry mechanism
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct FillRecord {
+    pub relayer: Address,              // Who filled on destination chain
+    pub repayment_address: BytesN<32>, // Relayer's address on source chain for payout
 }
 
 /// Outbound message (for testing/debugging)
 #[derive(Clone, Debug)]
 #[contracttype]
 pub struct OutboundMessage {
-    pub destination_chain: soroban_sdk::String,
-    pub destination_address: soroban_sdk::String,
-    pub payload: soroban_sdk::Bytes,
+    pub destination_chain: String,
+    pub destination_address: String,
+    pub payload: Bytes,
 }

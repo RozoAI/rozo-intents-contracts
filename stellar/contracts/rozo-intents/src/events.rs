@@ -1,4 +1,4 @@
-use crate::types::IntentStatus;
+use crate::types::{IntentStatus, RelayerType};
 use soroban_sdk::{Address, BytesN, Env, String, Symbol};
 
 pub fn emit_intent_created(
@@ -11,6 +11,7 @@ pub fn emit_intent_created(
     receiver: BytesN<32>,
     destination_amount: i128,
     deadline: u64,
+    relayer: BytesN<32>,
 ) {
     env.events().publish(
         (Symbol::new(env, "intent_created"), intent_id.clone()),
@@ -22,27 +23,28 @@ pub fn emit_intent_created(
             receiver,
             destination_amount,
             deadline,
+            relayer,
         ),
     );
 }
 
-pub fn emit_intent_filling(env: &Env, intent_id: BytesN<32>, relayer: Address) {
-    env.events().publish(
-        (Symbol::new(env, "intent_filling"), intent_id),
-        relayer,
-    );
-}
-
-pub fn emit_intent_filled(env: &Env, intent_id: BytesN<32>, relayer: Address, amount_paid: i128) {
+pub fn emit_intent_filled(env: &Env, intent_id: BytesN<32>, relayer: BytesN<32>, amount_paid: i128) {
     env.events().publish(
         (Symbol::new(env, "intent_filled"), intent_id),
         (relayer, amount_paid),
     );
 }
 
-pub fn emit_intent_failed(env: &Env, intent_id: BytesN<32>, reason: String) {
-    env.events()
-        .publish((Symbol::new(env, "intent_failed"), intent_id), reason);
+pub fn emit_intent_failed(
+    env: &Env,
+    intent_id: BytesN<32>,
+    expected_fill_hash: BytesN<32>,
+    received_fill_hash: BytesN<32>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "intent_failed"), intent_id),
+        (expected_fill_hash, received_fill_hash),
+    );
 }
 
 pub fn emit_intent_refunded(env: &Env, intent_id: BytesN<32>, refund_address: Address, amount: i128) {
@@ -56,12 +58,24 @@ pub fn emit_fill_and_notify_sent(
     env: &Env,
     intent_id: BytesN<32>,
     relayer: Address,
-    receiver: BytesN<32>,
-    amount: i128,
+    repayment_address: BytesN<32>,
+    messenger_id: u8,
 ) {
     env.events().publish(
         (Symbol::new(env, "fill_and_notify_sent"), intent_id),
-        (relayer, receiver, amount),
+        (relayer, repayment_address, messenger_id),
+    );
+}
+
+pub fn emit_retry_notify_sent(
+    env: &Env,
+    intent_id: BytesN<32>,
+    relayer: Address,
+    messenger_id: u8,
+) {
+    env.events().publish(
+        (Symbol::new(env, "retry_notify_sent"), intent_id),
+        (relayer, messenger_id),
     );
 }
 
@@ -81,8 +95,8 @@ pub fn emit_intent_status_changed(
 pub fn emit_intent_relayer_changed(
     env: &Env,
     intent_id: BytesN<32>,
-    old_relayer: Option<Address>,
-    new_relayer: Address,
+    old_relayer: BytesN<32>,
+    new_relayer: BytesN<32>,
     admin: Address,
 ) {
     env.events().publish(
@@ -101,9 +115,9 @@ pub fn emit_fee_recipient_set(env: &Env, recipient: Address) {
         .publish((Symbol::new(env, "fee_recipient_set"),), recipient);
 }
 
-pub fn emit_relayer_added(env: &Env, relayer: Address) {
+pub fn emit_relayer_added(env: &Env, relayer: Address, relayer_type: RelayerType) {
     env.events()
-        .publish((Symbol::new(env, "relayer_added"),), relayer);
+        .publish((Symbol::new(env, "relayer_added"),), (relayer, relayer_type));
 }
 
 pub fn emit_relayer_removed(env: &Env, relayer: Address) {
@@ -111,9 +125,19 @@ pub fn emit_relayer_removed(env: &Env, relayer: Address) {
         .publish((Symbol::new(env, "relayer_removed"),), relayer);
 }
 
-pub fn emit_messenger_set(env: &Env, messenger: Address, allowed: bool) {
+pub fn emit_messenger_adapter_set(env: &Env, messenger_id: u8, adapter: Address) {
     env.events()
-        .publish((Symbol::new(env, "messenger_set"),), (messenger, allowed));
+        .publish((Symbol::new(env, "messenger_adapter_set"),), (messenger_id, adapter));
+}
+
+pub fn emit_rozo_relayer_set(env: &Env, relayer: Address) {
+    env.events()
+        .publish((Symbol::new(env, "rozo_relayer_set"),), relayer);
+}
+
+pub fn emit_rozo_threshold_set(env: &Env, threshold: u64) {
+    env.events()
+        .publish((Symbol::new(env, "rozo_threshold_set"),), threshold);
 }
 
 pub fn emit_trusted_contract_set(env: &Env, chain_name: String, contract_address: String) {

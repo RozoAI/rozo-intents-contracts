@@ -1,22 +1,40 @@
 import { ethers, Contract, Wallet, Provider } from 'ethers';
-import { Intent, IntentStatus, ChainConfig, FillResult } from './types';
+import { Intent, IntentData, IntentStatus, ChainConfig, FillResult } from './types';
 
 // ABI for RozoIntents contract (minimal required functions)
 const ROZO_INTENTS_ABI = [
   // Events
-  'event IntentCreated(bytes32 indexed intentId, address indexed sender, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 receiver, uint256 destinationAmount, uint64 deadline)',
-  'event IntentFilling(bytes32 indexed intentId, address indexed relayer)',
+  'event IntentCreated(bytes32 indexed intentId, address indexed sender, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 receiver, uint256 destinationAmount, uint64 deadline, bytes32 relayer)',
   'event IntentFilled(bytes32 indexed intentId, address indexed relayer, uint256 amountPaid)',
   'event IntentRefunded(bytes32 indexed intentId, address indexed refundAddress, uint256 amount)',
+  'event FillAndNotifySent(bytes32 indexed intentId, address indexed relayer, bytes32 repaymentAddress, uint8 messengerId)',
+  'event RetryNotifySent(bytes32 indexed intentId, address indexed relayer, uint8 messengerId)',
 
   // View functions
-  'function getIntent(bytes32 intentId) external view returns (tuple(bytes32 intentId, address sender, address refundAddress, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint8 status, address relayer))',
-  'function isRelayer(address relayer) external view returns (bool)',
+  'function getIntent(bytes32 intentId) external view returns (tuple(bytes32 intentId, address sender, address refundAddress, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint64 createdAt, uint8 status, bytes32 relayer))',
+  'function getRelayerType(address relayer) external view returns (uint8)',
+  'function chainId() external view returns (uint256)',
 
-  // Relayer functions
-  'function fill(bytes32 intentId) external',
-  'function fillAndNotify(bytes32 intentId, address gasToken, uint256 gasFee) external payable',
+  // Relayer functions - new signatures
+  'function fillAndNotify(tuple(bytes32 intentId, bytes32 sender, bytes32 refundAddress, bytes32 sourceToken, uint256 sourceAmount, uint256 sourceChainId, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint64 createdAt, bytes32 relayer) intentData, bytes32 repaymentAddress, uint8 messengerId) external payable',
+  'function retryNotify(tuple(bytes32 intentId, bytes32 sender, bytes32 refundAddress, bytes32 sourceToken, uint256 sourceAmount, uint256 sourceChainId, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint64 createdAt, bytes32 relayer) intentData, uint8 messengerId) external payable',
 ];
+
+// Helper to convert address to bytes32 (left-padded)
+function addressToBytes32(address: string): string {
+  if (address.startsWith('0x')) {
+    address = address.slice(2);
+  }
+  return '0x' + address.toLowerCase().padStart(64, '0');
+}
+
+// Helper to convert bytes32 to address (extract last 20 bytes)
+function bytes32ToAddress(bytes32: string): string {
+  if (bytes32.startsWith('0x')) {
+    bytes32 = bytes32.slice(2);
+  }
+  return '0x' + bytes32.slice(-40);
+}
 
 export class EvmClient {
   private provider: Provider;
@@ -39,10 +57,25 @@ export class EvmClient {
   }
 
   /**
-   * Check if this relayer is whitelisted
+   * Get the relayer address as bytes32
+   */
+  getRelayerAddressBytes32(): string {
+    return addressToBytes32(this.wallet.address);
+  }
+
+  /**
+   * Check if this relayer is whitelisted (has RelayerType > 0)
    */
   async isWhitelisted(): Promise<boolean> {
-    return this.contract.isRelayer(this.wallet.address);
+    const relayerType = await this.contract.getRelayerType(this.wallet.address);
+    return Number(relayerType) > 0;
+  }
+
+  /**
+   * Get the chain ID from the contract
+   */
+  async getChainId(): Promise<number> {
+    return Number(await this.contract.chainId());
   }
 
   /**
@@ -54,6 +87,7 @@ export class EvmClient {
       return {
         intentId: result.intentId,
         sender: result.sender,
+        refundAddress: result.refundAddress,
         sourceToken: result.sourceToken,
         sourceAmount: result.sourceAmount,
         destinationChainId: Number(result.destinationChainId),
@@ -61,9 +95,9 @@ export class EvmClient {
         receiver: result.receiver,
         destinationAmount: result.destinationAmount,
         deadline: Number(result.deadline),
+        createdAt: Number(result.createdAt),
         status: Number(result.status) as IntentStatus,
-        relayer: result.relayer === ethers.ZeroAddress ? undefined : result.relayer,
-        refundAddress: result.refundAddress,
+        relayer: result.relayer,
       };
     } catch (error) {
       console.error(`Error getting intent ${intentId}:`, error);
@@ -74,7 +108,7 @@ export class EvmClient {
   /**
    * Listen for new intents
    */
-  onIntentCreated(callback: (intent: Intent) => void): void {
+  onIntentCreated(callback: (intent: Intent, sourceChainId: number) => void): void {
     const filter = this.contract.filters.IntentCreated();
     this.contract.on(filter, (
       intentId: string,
@@ -84,11 +118,13 @@ export class EvmClient {
       destinationChainId: bigint,
       receiver: string,
       destinationAmount: bigint,
-      deadline: bigint
+      deadline: bigint,
+      relayer: string
     ) => {
       callback({
         intentId,
         sender,
+        refundAddress: sender, // Default to sender
         sourceToken,
         sourceAmount,
         destinationChainId: Number(destinationChainId),
@@ -96,27 +132,71 @@ export class EvmClient {
         receiver,
         destinationAmount,
         deadline: Number(deadline),
-        status: IntentStatus.New,
-      });
+        createdAt: Math.floor(Date.now() / 1000), // Approximate
+        status: IntentStatus.Pending,
+        relayer,
+      }, this.chainConfig.chainId);
     });
   }
 
   /**
-   * Listen for intents being filled by other relayers
+   * Build IntentData struct from intent and source chain info
    */
-  onIntentFilling(callback: (intentId: string, relayer: string) => void): void {
-    const filter = this.contract.filters.IntentFilling();
-    this.contract.on(filter, (intentId: string, relayer: string) => {
-      callback(intentId, relayer);
-    });
+  buildIntentData(intent: Intent, sourceChainId: number): IntentData {
+    return {
+      intentId: intent.intentId,
+      sender: addressToBytes32(intent.sender),
+      refundAddress: addressToBytes32(intent.refundAddress),
+      sourceToken: addressToBytes32(intent.sourceToken),
+      sourceAmount: intent.sourceAmount,
+      sourceChainId: sourceChainId,
+      destinationChainId: intent.destinationChainId,
+      destinationToken: intent.destinationToken, // Already bytes32
+      receiver: intent.receiver, // Already bytes32
+      destinationAmount: intent.destinationAmount,
+      deadline: intent.deadline,
+      createdAt: intent.createdAt,
+      relayer: intent.relayer, // Already bytes32
+    };
   }
 
   /**
-   * Call fill() on the contract to claim an intent
+   * Call fillAndNotify() on the destination chain
+   * This pays the receiver and sends notification back to source chain
+   *
+   * @param intentData Full intent data for verification
+   * @param repaymentAddress Where to receive payment on source chain (bytes32)
+   * @param messengerId Messenger to use (0 = Rozo, 1 = Axelar)
    */
-  async fill(intentId: string): Promise<FillResult> {
+  async fillAndNotify(
+    intentData: IntentData,
+    repaymentAddress: string,
+    messengerId: number = 0
+  ): Promise<FillResult> {
     try {
-      const tx = await this.contract.fill(intentId);
+      // Convert IntentData to contract struct format
+      const intentDataStruct = {
+        intentId: intentData.intentId,
+        sender: intentData.sender,
+        refundAddress: intentData.refundAddress,
+        sourceToken: intentData.sourceToken,
+        sourceAmount: intentData.sourceAmount,
+        sourceChainId: intentData.sourceChainId,
+        destinationChainId: intentData.destinationChainId,
+        destinationToken: intentData.destinationToken,
+        receiver: intentData.receiver,
+        destinationAmount: intentData.destinationAmount,
+        deadline: intentData.deadline,
+        createdAt: intentData.createdAt,
+        relayer: intentData.relayer,
+      };
+
+      const tx = await this.contract.fillAndNotify(
+        intentDataStruct,
+        repaymentAddress,
+        messengerId,
+        { value: 0 } // Gas payment handled by messenger adapter
+      );
       const receipt = await tx.wait();
       return {
         success: true,
@@ -131,15 +211,37 @@ export class EvmClient {
   }
 
   /**
-   * Call fillAndNotify() for local chain fills (source == destination)
+   * Call retryNotify() to resend a fill notification
+   * Used when the original notification failed
+   *
+   * @param intentData Full intent data
+   * @param messengerId Messenger to use for retry
    */
-  async fillAndNotify(intentId: string, gasFee: bigint = 0n): Promise<FillResult> {
+  async retryNotify(
+    intentData: IntentData,
+    messengerId: number
+  ): Promise<FillResult> {
     try {
-      const tx = await this.contract.fillAndNotify(
-        intentId,
-        ethers.ZeroAddress, // Native gas token
-        gasFee,
-        { value: gasFee }
+      const intentDataStruct = {
+        intentId: intentData.intentId,
+        sender: intentData.sender,
+        refundAddress: intentData.refundAddress,
+        sourceToken: intentData.sourceToken,
+        sourceAmount: intentData.sourceAmount,
+        sourceChainId: intentData.sourceChainId,
+        destinationChainId: intentData.destinationChainId,
+        destinationToken: intentData.destinationToken,
+        receiver: intentData.receiver,
+        destinationAmount: intentData.destinationAmount,
+        deadline: intentData.deadline,
+        createdAt: intentData.createdAt,
+        relayer: intentData.relayer,
+      };
+
+      const tx = await this.contract.retryNotify(
+        intentDataStruct,
+        messengerId,
+        { value: 0 }
       );
       const receipt = await tx.wait();
       return {
@@ -168,6 +270,7 @@ export class EvmClient {
         intents.push({
           intentId: args.intentId,
           sender: args.sender,
+          refundAddress: args.sender, // Default
           sourceToken: args.sourceToken,
           sourceAmount: args.sourceAmount,
           destinationChainId: Number(args.destinationChainId),
@@ -175,7 +278,9 @@ export class EvmClient {
           receiver: args.receiver,
           destinationAmount: args.destinationAmount,
           deadline: Number(args.deadline),
-          status: IntentStatus.New,
+          createdAt: Math.floor(Date.now() / 1000), // Approximate
+          status: IntentStatus.Pending,
+          relayer: args.relayer,
         });
       }
     }

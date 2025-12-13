@@ -1,18 +1,10 @@
 use crate::errors::Error;
-use crate::types::{Intent, OutboundMessage};
+use crate::types::{FillRecord, Intent, OutboundMessage, RelayerType};
 use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, String, Vec};
 
 // Storage keys using symbol_short!
 fn owner_key() -> soroban_sdk::Symbol {
     symbol_short!("OWNER")
-}
-
-fn gateway_key() -> soroban_sdk::Symbol {
-    symbol_short!("GATEWAY")
-}
-
-fn gas_svc_key() -> soroban_sdk::Symbol {
-    symbol_short!("GAS_SVC")
 }
 
 fn fee_rcpt_key() -> soroban_sdk::Symbol {
@@ -27,6 +19,18 @@ fn outbound_key() -> soroban_sdk::Symbol {
     symbol_short!("OUT_MSG")
 }
 
+fn rozo_relayer_key() -> soroban_sdk::Symbol {
+    symbol_short!("ROZO_REL")
+}
+
+fn rozo_threshold_key() -> soroban_sdk::Symbol {
+    symbol_short!("ROZO_TH")
+}
+
+fn chain_id_key() -> soroban_sdk::Symbol {
+    symbol_short!("CHAIN_ID")
+}
+
 // Key builders
 fn intent_key(intent_id: &BytesN<32>) -> (soroban_sdk::Symbol, BytesN<32>) {
     (symbol_short!("INTENT"), intent_id.clone())
@@ -36,8 +40,12 @@ fn relayer_key(relayer: &Address) -> (soroban_sdk::Symbol, Address) {
     (symbol_short!("RELAYER"), relayer.clone())
 }
 
-fn messenger_key(messenger: &Address) -> (soroban_sdk::Symbol, Address) {
-    (symbol_short!("MSGER"), messenger.clone())
+fn messenger_adapter_key(messenger_id: u8) -> (soroban_sdk::Symbol, u8) {
+    (symbol_short!("MSG_ADP"), messenger_id)
+}
+
+fn fill_record_key(fill_hash: &BytesN<32>) -> (soroban_sdk::Symbol, BytesN<32>) {
+    (symbol_short!("FILL"), fill_hash.clone())
 }
 
 fn trusted_key(chain_name: &String) -> (soroban_sdk::Symbol, String) {
@@ -70,33 +78,7 @@ pub fn set_owner(env: &Env, owner: &Address) {
 
 pub fn require_owner(env: &Env) -> Result<(), Error> {
     let _owner = get_owner(env)?;
-    // Note: In Soroban, we use require_auth() on the owner address
-    // This is called by admin functions which should pass owner as a parameter
     Ok(())
-}
-
-// Gateway
-pub fn get_gateway(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&gateway_key())
-        .ok_or(Error::NotInitialized)
-}
-
-pub fn set_gateway(env: &Env, gateway: &Address) {
-    env.storage().instance().set(&gateway_key(), gateway);
-}
-
-// Gas Service
-pub fn get_gas_service(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&gas_svc_key())
-        .ok_or(Error::NotInitialized)
-}
-
-pub fn set_gas_service(env: &Env, gas_service: &Address) {
-    env.storage().instance().set(&gas_svc_key(), gas_service);
 }
 
 // Fee Recipient
@@ -120,6 +102,38 @@ pub fn set_protocol_fee_storage(env: &Env, fee_bps: u32) {
     env.storage().instance().set(&proto_fee_key(), &fee_bps);
 }
 
+// Rozo Relayer
+pub fn get_rozo_relayer(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&rozo_relayer_key())
+}
+
+pub fn set_rozo_relayer(env: &Env, relayer: &Address) {
+    env.storage().instance().set(&rozo_relayer_key(), relayer);
+}
+
+// Rozo Relayer Threshold (seconds)
+pub fn get_rozo_relayer_threshold(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&rozo_threshold_key())
+        .unwrap_or(0)
+}
+
+pub fn set_rozo_relayer_threshold(env: &Env, threshold: u64) {
+    env.storage()
+        .instance()
+        .set(&rozo_threshold_key(), &threshold);
+}
+
+// Chain ID (current chain's ID)
+pub fn get_chain_id(env: &Env) -> u64 {
+    env.storage().instance().get(&chain_id_key()).unwrap_or(0)
+}
+
+pub fn set_chain_id(env: &Env, chain_id: u64) {
+    env.storage().instance().set(&chain_id_key(), &chain_id);
+}
+
 // Intents
 pub fn has_intent(env: &Env, intent_id: &BytesN<32>) -> bool {
     env.storage().persistent().has(&intent_key(intent_id))
@@ -138,32 +152,50 @@ pub fn set_intent(env: &Env, intent_id: &BytesN<32>, intent: &Intent) {
         .set(&intent_key(intent_id), intent);
 }
 
-// Relayers
-pub fn is_relayer(env: &Env, relayer: &Address) -> bool {
+// Relayers (now returns RelayerType)
+pub fn get_relayer_type(env: &Env, relayer: &Address) -> RelayerType {
     env.storage()
         .instance()
         .get(&relayer_key(relayer))
-        .unwrap_or(false)
+        .unwrap_or(RelayerType::None)
 }
 
-pub fn set_relayer(env: &Env, relayer: &Address, allowed: bool) {
+pub fn set_relayer_type(env: &Env, relayer: &Address, relayer_type: RelayerType) {
     env.storage()
         .instance()
-        .set(&relayer_key(relayer), &allowed);
+        .set(&relayer_key(relayer), &relayer_type);
 }
 
-// Messengers
-pub fn is_messenger(env: &Env, messenger: &Address) -> bool {
-    env.storage()
-        .instance()
-        .get(&messenger_key(messenger))
-        .unwrap_or(false)
+pub fn is_relayer(env: &Env, relayer: &Address) -> bool {
+    get_relayer_type(env, relayer) != RelayerType::None
 }
 
-pub fn set_messenger(env: &Env, messenger: &Address, allowed: bool) {
+// Messenger Adapters (by messengerId)
+pub fn get_messenger_adapter(env: &Env, messenger_id: u8) -> Option<Address> {
     env.storage()
         .instance()
-        .set(&messenger_key(messenger), &allowed);
+        .get(&messenger_adapter_key(messenger_id))
+}
+
+pub fn set_messenger_adapter(env: &Env, messenger_id: u8, adapter: &Address) {
+    env.storage()
+        .instance()
+        .set(&messenger_adapter_key(messenger_id), adapter);
+}
+
+// Fill Records (destination chain - for double-fill prevention)
+pub fn has_fill_record(env: &Env, fill_hash: &BytesN<32>) -> bool {
+    env.storage().persistent().has(&fill_record_key(fill_hash))
+}
+
+pub fn get_fill_record(env: &Env, fill_hash: &BytesN<32>) -> Option<FillRecord> {
+    env.storage().persistent().get(&fill_record_key(fill_hash))
+}
+
+pub fn set_fill_record(env: &Env, fill_hash: &BytesN<32>, record: &FillRecord) {
+    env.storage()
+        .persistent()
+        .set(&fill_record_key(fill_hash), record);
 }
 
 // Trusted Contracts
@@ -180,7 +212,7 @@ pub fn set_trusted_contract_storage(env: &Env, chain_name: &String, contract_add
         .set(&trusted_key(chain_name), contract_address);
 }
 
-// Chain Names
+// Chain Names (chain_id -> chain_name mapping)
 pub fn get_chain_name(env: &Env, chain_id: u64) -> Result<String, Error> {
     env.storage()
         .instance()

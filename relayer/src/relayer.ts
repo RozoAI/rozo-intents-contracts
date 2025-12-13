@@ -1,4 +1,4 @@
-import { Intent, IntentStatus, RelayerConfig, ChainConfig } from './types';
+import { Intent, IntentData, IntentStatus, RelayerConfig, ChainConfig } from './types';
 import { EvmClient } from './evm-client';
 import { StellarClient } from './stellar-client';
 
@@ -7,17 +7,31 @@ const STELLAR_CHAIN_ID = 1500;
 const BASE_CHAIN_ID = 8453;
 const BASE_SEPOLIA_CHAIN_ID = 84532;
 
+// Helper to convert address to bytes32 (left-padded)
+function addressToBytes32(address: string): string {
+  if (address.startsWith('0x')) {
+    address = address.slice(2);
+  }
+  return '0x' + address.toLowerCase().padStart(64, '0');
+}
+
 /**
  * RozoIntents Relayer
  *
  * Monitors for new intents and fills them by paying on destination chain,
- * then receiving payment on source chain via Axelar verification.
+ * then receiving payment on source chain via messenger verification.
+ *
+ * New design:
+ * - No separate fill() on source chain
+ * - fillAndNotify() on destination chain handles everything
+ * - Messenger sends notification back to source chain
+ * - notify() on source chain releases funds to relayer
  */
 export class Relayer {
   private config: RelayerConfig;
   private evmClients: Map<number, EvmClient> = new Map();
   private stellarClient: StellarClient | null = null;
-  private activeIntents: Map<string, Intent> = new Map();
+  private activeIntents: Map<string, { intent: Intent; sourceChainId: number }> = new Map();
   private isRunning: boolean = false;
 
   constructor(config: RelayerConfig) {
@@ -53,16 +67,9 @@ export class Relayer {
 
     // Set up event listeners for EVM chains
     for (const [chainId, client] of this.evmClients) {
-      client.onIntentCreated((intent) => {
+      client.onIntentCreated((intent, sourceChainId) => {
         console.log(`New intent detected on chain ${chainId}: ${intent.intentId}`);
-        this.handleNewIntent(intent, chainId);
-      });
-
-      client.onIntentFilling((intentId, relayer) => {
-        if (relayer.toLowerCase() !== client.getRelayerAddress().toLowerCase()) {
-          console.log(`Intent ${intentId} claimed by another relayer: ${relayer}`);
-          this.activeIntents.delete(intentId);
-        }
+        this.handleNewIntent(intent, sourceChainId);
       });
     }
 
@@ -124,20 +131,20 @@ export class Relayer {
    */
   private async checkFillableIntents(client: EvmClient, sourceChainId: number): Promise<void> {
     // For demo, we check active intents we're tracking
-    for (const [intentId, intent] of this.activeIntents) {
+    for (const [intentId, { intent, sourceChainId: storedSourceChainId }] of this.activeIntents) {
       // Refresh intent status
       const currentIntent = await client.getIntent(intentId);
       if (!currentIntent) continue;
 
       // Update local state
-      this.activeIntents.set(intentId, currentIntent);
+      this.activeIntents.set(intentId, { intent: currentIntent, sourceChainId: storedSourceChainId });
 
-      // Check if still fillable
-      if (currentIntent.status === IntentStatus.New) {
+      // Check if still fillable (PENDING status)
+      if (currentIntent.status === IntentStatus.Pending) {
         const now = Math.floor(Date.now() / 1000);
         if (currentIntent.deadline > now) {
           // Attempt to fill
-          await this.attemptFill(currentIntent, sourceChainId);
+          await this.attemptFill(currentIntent, storedSourceChainId);
         }
       }
     }
@@ -159,7 +166,7 @@ export class Relayer {
     }
 
     // Track the intent
-    this.activeIntents.set(intent.intentId, intent);
+    this.activeIntents.set(intent.intentId, { intent, sourceChainId });
 
     // Attempt to fill
     await this.attemptFill(intent, sourceChainId);
@@ -182,7 +189,52 @@ export class Relayer {
   }
 
   /**
+   * Build IntentData from intent for cross-chain verification
+   */
+  private buildIntentData(intent: Intent, sourceChainId: number): IntentData {
+    return {
+      intentId: intent.intentId,
+      sender: addressToBytes32(intent.sender),
+      refundAddress: addressToBytes32(intent.refundAddress),
+      sourceToken: addressToBytes32(intent.sourceToken),
+      sourceAmount: intent.sourceAmount,
+      sourceChainId: sourceChainId,
+      destinationChainId: intent.destinationChainId,
+      destinationToken: intent.destinationToken, // Already bytes32
+      receiver: intent.receiver, // Already bytes32
+      destinationAmount: intent.destinationAmount,
+      deadline: intent.deadline,
+      createdAt: intent.createdAt,
+      relayer: intent.relayer, // Already bytes32
+    };
+  }
+
+  /**
+   * Get relayer's repayment address for source chain (bytes32 format)
+   */
+  private getRepaymentAddress(sourceChainId: number): string {
+    if (this.isEvmChain(sourceChainId)) {
+      const client = this.evmClients.get(sourceChainId);
+      if (client) {
+        return client.getRelayerAddressBytes32();
+      }
+    } else if (sourceChainId === STELLAR_CHAIN_ID && this.stellarClient) {
+      return this.stellarClient.getRelayerAddressBytes32();
+    }
+    // Fallback: use first EVM client's address
+    const firstClient = this.evmClients.values().next().value;
+    return firstClient ? firstClient.getRelayerAddressBytes32() : '0x' + '00'.repeat(32);
+  }
+
+  /**
    * Attempt to fill an intent
+   *
+   * New flow (no separate fill() on source chain):
+   * 1. Build IntentData struct
+   * 2. Call fillAndNotify() on destination chain
+   * 3. Destination contract pays receiver + sends notification
+   * 4. Messenger delivers notification to source chain
+   * 5. Source chain releases funds to relayer's repaymentAddress
    */
   private async attemptFill(intent: Intent, sourceChainId: number): Promise<void> {
     console.log(`Attempting to fill intent ${intent.intentId}`);
@@ -191,84 +243,130 @@ export class Relayer {
     console.log(`  Source amount: ${intent.sourceAmount}`);
     console.log(`  Destination amount: ${intent.destinationAmount}`);
 
-    const sourceClient = this.evmClients.get(sourceChainId);
-    if (!sourceClient) {
-      console.error(`No client for source chain ${sourceChainId}`);
-      return;
-    }
+    // Build IntentData for verification
+    const intentData = this.buildIntentData(intent, sourceChainId);
 
-    // Step 1: Call fill() on source chain to claim the intent
-    console.log('Step 1: Calling fill() on source chain...');
-    const fillResult = await sourceClient.fill(intent.intentId);
+    // Get repayment address on source chain
+    const repaymentAddress = this.getRepaymentAddress(sourceChainId);
 
-    if (!fillResult.success) {
-      console.error(`Fill failed: ${fillResult.error}`);
-      return;
-    }
+    // Use configured messenger ID (default 0 = Rozo)
+    const messengerId = this.config.defaultMessengerId ?? 0;
 
-    console.log(`Fill successful! TX: ${fillResult.txHash}`);
-
-    // Step 2: Pay on destination chain
+    // Call fillAndNotify on destination chain
     if (intent.destinationChainId === STELLAR_CHAIN_ID) {
       // Destination is Stellar
-      await this.payOnStellar(intent, sourceChainId);
+      await this.fillOnStellar(intentData, repaymentAddress, messengerId);
     } else if (this.isEvmChain(intent.destinationChainId)) {
       // Destination is EVM
-      await this.payOnEvm(intent, sourceChainId);
+      await this.fillOnEvm(intentData, repaymentAddress, messengerId);
     } else {
       console.error(`Unknown destination chain: ${intent.destinationChainId}`);
     }
   }
 
   /**
-   * Pay receiver on Stellar and send notification
+   * Fill on Stellar destination chain
    */
-  private async payOnStellar(intent: Intent, sourceChainId: number): Promise<void> {
+  private async fillOnStellar(
+    intentData: IntentData,
+    repaymentAddress: string,
+    messengerId: number
+  ): Promise<void> {
     if (!this.stellarClient) {
       console.error('Stellar client not initialized');
       return;
     }
 
-    console.log('Step 2: Calling fillAndNotify() on Stellar...');
-
-    const sourceChain = this.getChainName(sourceChainId);
+    console.log('Calling fillAndNotify() on Stellar...');
+    console.log(`  Messenger ID: ${messengerId}`);
+    console.log(`  Repayment address: ${repaymentAddress}`);
 
     const result = await this.stellarClient.fillAndNotify(
-      intent.intentId,
-      intent.receiver,
-      intent.destinationAmount,
-      sourceChain,
-      '', // Gas token (native XLM)
-      0n  // Gas fee
+      intentData,
+      repaymentAddress,
+      messengerId
     );
 
     if (result.success) {
       console.log(`Stellar fillAndNotify successful! TX: ${result.txHash}`);
-      console.log('Axelar will verify and call notify() on source chain...');
+      console.log('Messenger will deliver notification to source chain...');
+      // Remove from active intents (will be confirmed via notify on source)
+      this.activeIntents.delete(intentData.intentId);
     } else {
       console.error(`Stellar fillAndNotify failed: ${result.error}`);
     }
   }
 
   /**
-   * Pay receiver on EVM destination chain
+   * Fill on EVM destination chain
    */
-  private async payOnEvm(intent: Intent, sourceChainId: number): Promise<void> {
-    const destClient = this.evmClients.get(intent.destinationChainId);
+  private async fillOnEvm(
+    intentData: IntentData,
+    repaymentAddress: string,
+    messengerId: number
+  ): Promise<void> {
+    const destClient = this.evmClients.get(intentData.destinationChainId);
     if (!destClient) {
-      console.error(`No client for destination chain ${intent.destinationChainId}`);
+      console.error(`No client for destination chain ${intentData.destinationChainId}`);
       return;
     }
 
-    console.log('Step 2: Calling fillAndNotify() on EVM destination...');
+    console.log('Calling fillAndNotify() on EVM destination...');
+    console.log(`  Messenger ID: ${messengerId}`);
+    console.log(`  Repayment address: ${repaymentAddress}`);
 
-    // For same-chain or EVM-EVM, use fillAndNotify on destination
-    const result = await destClient.fillAndNotify(intent.intentId);
+    const result = await destClient.fillAndNotify(
+      intentData,
+      repaymentAddress,
+      messengerId
+    );
 
     if (result.success) {
       console.log(`EVM fillAndNotify successful! TX: ${result.txHash}`);
+      console.log('Messenger will deliver notification to source chain...');
+      // Remove from active intents (will be confirmed via notify on source)
+      this.activeIntents.delete(intentData.intentId);
     } else {
       console.error(`EVM fillAndNotify failed: ${result.error}`);
+    }
+  }
+
+  /**
+   * Retry a failed notification
+   * Call this if the original fillAndNotify succeeded but messenger delivery failed
+   */
+  async retryNotification(
+    intent: Intent,
+    sourceChainId: number,
+    messengerId: number
+  ): Promise<void> {
+    console.log(`Retrying notification for intent ${intent.intentId} with messenger ${messengerId}`);
+
+    const intentData = this.buildIntentData(intent, sourceChainId);
+
+    if (intent.destinationChainId === STELLAR_CHAIN_ID) {
+      if (!this.stellarClient) {
+        console.error('Stellar client not initialized');
+        return;
+      }
+      const result = await this.stellarClient.retryNotify(intentData, messengerId);
+      if (result.success) {
+        console.log(`Stellar retryNotify successful! TX: ${result.txHash}`);
+      } else {
+        console.error(`Stellar retryNotify failed: ${result.error}`);
+      }
+    } else if (this.isEvmChain(intent.destinationChainId)) {
+      const destClient = this.evmClients.get(intent.destinationChainId);
+      if (!destClient) {
+        console.error(`No client for destination chain ${intent.destinationChainId}`);
+        return;
+      }
+      const result = await destClient.retryNotify(intentData, messengerId);
+      if (result.success) {
+        console.log(`EVM retryNotify successful! TX: ${result.txHash}`);
+      } else {
+        console.error(`EVM retryNotify failed: ${result.error}`);
+      }
     }
   }
 

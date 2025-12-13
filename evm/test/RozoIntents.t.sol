@@ -5,20 +5,18 @@ import "forge-std/Test.sol";
 import "../src/RozoIntents.sol";
 import "../src/interfaces/IRozoIntents.sol";
 import "./mocks/MockERC20.sol";
-import "./mocks/MockAxelarGateway.sol";
-import "./mocks/MockGasService.sol";
-import "./mocks/MockBridgeAdapter.sol";
+import "./mocks/MockMessengerAdapter.sol";
 
 contract RozoIntentsTest is Test {
     RozoIntents internal intents;
     MockERC20 internal token;
-    MockAxelarGateway internal gateway;
-    MockGasService internal gasService;
-    MockBridgeAdapter internal bridge;
+    MockMessengerAdapter internal rozoAdapter;
+    MockMessengerAdapter internal axelarAdapter;
 
     address internal constant SENDER = address(0x1111);
     address internal constant RELAYER = address(0x2222);
     address internal constant RELAYER_TWO = address(0x2223);
+    address internal constant ROZO_RELAYER = address(0x2224);
     address internal constant REFUND = address(0x3333);
     address internal constant RECEIVER = address(0x4444);
     address internal constant FEE_RECIPIENT = address(0x5555);
@@ -30,40 +28,56 @@ contract RozoIntentsTest is Test {
     bytes32 internal constant DEST_TOKEN = bytes32(uint256(uint160(address(0x9999))));
     bytes32 internal constant RECEIVER_BYTES = bytes32(uint256(uint160(RECEIVER)));
 
-    string internal constant SOURCE_CHAIN_NAME = "stellar";
-    string internal constant CALLBACK_CHAIN_NAME = "base";
-    string internal constant SOURCE_CONTRACT = "stellar-contract";
-    string internal constant DEST_CONTRACT = "base-contract";
-
     function setUp() public {
         token = new MockERC20("Mock USDC", "USDC", 6);
-        gateway = new MockAxelarGateway();
-        gasService = new MockGasService();
-        bridge = new MockBridgeAdapter();
 
-        intents = new RozoIntents(address(this), address(gateway), address(gasService), FEE_RECIPIENT);
+        intents = new RozoIntents(address(this), FEE_RECIPIENT);
+
+        // Create and register messenger adapters
+        rozoAdapter = new MockMessengerAdapter(0, address(intents)); // Rozo = 0
+        axelarAdapter = new MockMessengerAdapter(1, address(intents)); // Axelar = 1
+
+        intents.setMessengerAdapter(address(rozoAdapter));
+        intents.setMessengerAdapter(address(axelarAdapter));
 
         vm.deal(RELAYER, 10 ether);
         vm.deal(RELAYER_TWO, 10 ether);
+        vm.deal(ROZO_RELAYER, 10 ether);
 
         token.mint(SENDER, 100_000e6);
         token.mint(RELAYER, 100_000e6);
         token.mint(RELAYER_TWO, 100_000e6);
+        token.mint(ROZO_RELAYER, 100_000e6);
 
-        intents.addRelayer(RELAYER);
-        intents.addRelayer(RELAYER_TWO);
+        // Add relayers with types
+        intents.addRelayer(RELAYER, RelayerType.EXTERNAL);
+        intents.addRelayer(RELAYER_TWO, RelayerType.EXTERNAL);
+        intents.addRelayer(ROZO_RELAYER, RelayerType.ROZO);
+
+        // Configure Rozo fallback
+        intents.setRozoRelayer(ROZO_RELAYER);
+        intents.setRozoRelayerThreshold(10); // 10 seconds
+
         intents.setProtocolFee(3);
-        intents.setChainIdToAxelarName(SOURCE_CHAIN_ID, CALLBACK_CHAIN_NAME);
-        intents.setTrustedContract(SOURCE_CHAIN_NAME, SOURCE_CONTRACT);
-        intents.setTrustedContract(CALLBACK_CHAIN_NAME, DEST_CONTRACT);
+        intents.setTrustedContract("stellar", "stellar-contract");
+        intents.setTrustedContract("base", "base-contract");
     }
+
+    // ============ Create Intent Tests ============
 
     function testCreateIntentSuccess() public {
         bytes32 intentId = _createIntent();
         Intent memory stored = intents.intents(intentId);
-        assertEq(uint256(stored.status), uint256(IntentStatus.NEW));
+        assertEq(uint256(stored.status), uint256(IntentStatus.PENDING));
         assertEq(stored.sender, SENDER);
+        assertEq(stored.createdAt, block.timestamp);
         assertEq(token.balanceOf(address(intents)), SOURCE_AMOUNT);
+    }
+
+    function testCreateIntentWithAssignedRelayer() public {
+        bytes32 intentId = _createIntentWithRelayer(_addressToBytes32(RELAYER));
+        Intent memory stored = intents.intents(intentId);
+        assertEq(stored.relayer, _addressToBytes32(RELAYER));
     }
 
     function testCreateIntentRevertsDuplicate() public {
@@ -80,143 +94,257 @@ contract RozoIntentsTest is Test {
             RECEIVER_BYTES,
             DESTINATION_AMOUNT,
             uint64(block.timestamp + 1 hours),
-            REFUND
+            REFUND,
+            bytes32(0)
         );
         vm.stopPrank();
     }
 
-    function testFillSuccess() public {
-        bytes32 intentId = _createIntent();
-        vm.prank(RELAYER);
-        intents.fill(intentId);
-        Intent memory stored = intents.intents(intentId);
-        assertEq(uint256(stored.status), uint256(IntentStatus.FILLING));
-        assertEq(stored.relayer, RELAYER);
+    // ============ Fill And Notify Tests (Destination Chain) ============
+
+    function testFillAndNotifySuccess() public {
+        IntentData memory intentData = _createIntentData();
+
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        vm.stopPrank();
+
+        assertEq(token.balanceOf(RECEIVER), DESTINATION_AMOUNT);
+
+        // Check fill record was stored
+        bytes32 fillHash = keccak256(abi.encode(intentData));
+        FillRecord memory record = intents.filledIntents(fillHash);
+        assertEq(record.relayer, RELAYER);
+        assertEq(record.repaymentAddress, _addressToBytes32(RELAYER));
     }
 
-    function testFillRevertsIfNotRelayer() public {
-        bytes32 intentId = _createIntent();
-        address stranger = address(0xAAAA);
-        vm.prank(stranger);
+    function testFillAndNotifyWithDifferentRepaymentAddress() public {
+        IntentData memory intentData = _createIntentData();
+        bytes32 repaymentAddress = _addressToBytes32(address(0x9876));
+
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        intents.fillAndNotify(intentData, repaymentAddress, 0);
+        vm.stopPrank();
+
+        bytes32 fillHash = keccak256(abi.encode(intentData));
+        FillRecord memory record = intents.filledIntents(fillHash);
+        assertEq(record.repaymentAddress, repaymentAddress);
+    }
+
+    function testFillAndNotifyRevertsForNonRelayer() public {
+        IntentData memory intentData = _createIntentData();
+        address stranger = address(0xABBA);
+        token.mint(stranger, DESTINATION_AMOUNT);
+
+        vm.startPrank(stranger);
+        token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.NotRelayer.selector);
-        intents.fill(intentId);
+        intents.fillAndNotify(intentData, _addressToBytes32(stranger), 0);
+        vm.stopPrank();
     }
 
-    function testFillRevertsIfExpired() public {
-        bytes32 intentId = _createIntent();
-        vm.warp(block.timestamp + 2 hours);
-        vm.prank(RELAYER);
+    function testFillAndNotifyRevertsIfExpired() public {
+        IntentData memory intentData = _createIntentData();
+        intentData.deadline = uint64(block.timestamp - 1);
+
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.IntentExpired.selector);
-        intents.fill(intentId);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        vm.stopPrank();
     }
 
-    function testNotifyCompletesFillFromFilling() public {
-        bytes32 intentId = _createIntent();
+    function testFillAndNotifyRevertsIfWrongChain() public {
+        IntentData memory intentData = _createIntentData();
+        intentData.destinationChainId = 9999;
+
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        vm.expectRevert(IRozoIntentsErrors.WrongChain.selector);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        vm.stopPrank();
+    }
+
+    function testFillAndNotifyRevertsOnDoubleFill() public {
+        IntentData memory intentData = _createIntentData();
+
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT * 2);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+
+        vm.expectRevert(IRozoIntentsErrors.AlreadyFilled.selector);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        vm.stopPrank();
+    }
+
+    function testFillAndNotifyRevertsIfNotAssignedRelayer() public {
+        IntentData memory intentData = _createIntentData();
+        intentData.relayer = _addressToBytes32(RELAYER_TWO); // Assign to RELAYER_TWO
+
+        vm.startPrank(RELAYER); // But RELAYER tries to fill
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        vm.expectRevert(IRozoIntentsErrors.NotAssignedRelayer.selector);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        vm.stopPrank();
+    }
+
+    function testFillAndNotifyRozoFallbackWorks() public {
+        IntentData memory intentData = _createIntentData();
+        intentData.relayer = _addressToBytes32(RELAYER); // Assign to RELAYER
+        intentData.createdAt = uint64(block.timestamp - 15); // Created 15 seconds ago
+
+        // ROZO_RELAYER can fill after threshold (10 seconds)
+        vm.startPrank(ROZO_RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        intents.fillAndNotify(intentData, _addressToBytes32(ROZO_RELAYER), 0);
+        vm.stopPrank();
+
+        assertEq(token.balanceOf(RECEIVER), DESTINATION_AMOUNT);
+    }
+
+    function testFillAndNotifyRozoFallbackRevertsBeforeThreshold() public {
+        IntentData memory intentData = _createIntentData();
+        intentData.relayer = _addressToBytes32(RELAYER); // Assign to RELAYER
+        intentData.createdAt = uint64(block.timestamp - 5); // Created 5 seconds ago
+
+        // ROZO_RELAYER cannot fill before threshold (10 seconds)
+        vm.startPrank(ROZO_RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        vm.expectRevert(IRozoIntentsErrors.NotAssignedRelayer.selector);
+        intents.fillAndNotify(intentData, _addressToBytes32(ROZO_RELAYER), 0);
+        vm.stopPrank();
+    }
+
+    function testFillAndNotifyWithDifferentMessengers() public {
+        IntentData memory intentData = _createIntentData();
+
+        // Test with Axelar (messengerId = 1)
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 1);
+        vm.stopPrank();
+
+        // Check that Axelar adapter received the message
+        MockMessengerAdapter.SentMessage memory sent = axelarAdapter.lastSentMessage();
+        assertEq(sent.destinationChainId, intentData.sourceChainId);
+    }
+
+    function testFillAndNotifyRevertsInvalidMessenger() public {
+        IntentData memory intentData = _createIntentData();
+
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        vm.expectRevert(IRozoIntentsErrors.InvalidMessenger.selector);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 99); // Invalid messengerId
+        vm.stopPrank();
+    }
+
+    // ============ Retry Notify Tests ============
+
+    function testRetryNotifySuccess() public {
+        IntentData memory intentData = _createIntentData();
+
+        // First fill with Rozo adapter
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+
+        // Retry with Axelar adapter
+        intents.retryNotify(intentData, 1);
+        vm.stopPrank();
+
+        // Check Axelar adapter received retry message
+        MockMessengerAdapter.SentMessage memory sent = axelarAdapter.lastSentMessage();
+        assertEq(sent.destinationChainId, intentData.sourceChainId);
+    }
+
+    function testRetryNotifyRevertsIfNotFilled() public {
+        IntentData memory intentData = _createIntentData();
+
         vm.prank(RELAYER);
-        intents.fill(intentId);
+        vm.expectRevert(IRozoIntentsErrors.IntentNotFound.selector);
+        intents.retryNotify(intentData, 1);
+    }
+
+    function testRetryNotifyRevertsIfNotOriginalFiller() public {
+        IntentData memory intentData = _createIntentData();
+
+        vm.startPrank(RELAYER);
+        token.approve(address(intents), DESTINATION_AMOUNT);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        vm.stopPrank();
+
+        // Different relayer tries to retry
+        vm.prank(RELAYER_TWO);
+        vm.expectRevert(IRozoIntentsErrors.NotAssignedRelayer.selector);
+        intents.retryNotify(intentData, 1);
+    }
+
+    // ============ Notify Tests (Source Chain) ============
+
+    function testNotifyCompletesFill() public {
+        bytes32 intentId = _createIntent();
+        Intent memory stored = intents.intents(intentId);
+
+        // Build IntentData from stored intent
+        IntentData memory intentData = IntentData({
+            intentId: intentId,
+            sender: _addressToBytes32(stored.sender),
+            refundAddress: _addressToBytes32(stored.refundAddress),
+            sourceToken: _addressToBytes32(stored.sourceToken),
+            sourceAmount: stored.sourceAmount,
+            sourceChainId: block.chainid,
+            destinationChainId: stored.destinationChainId,
+            destinationToken: stored.destinationToken,
+            receiver: stored.receiver,
+            destinationAmount: stored.destinationAmount,
+            deadline: stored.deadline,
+            createdAt: stored.createdAt,
+            relayer: stored.relayer
+        });
+
+        bytes32 fillHash = keccak256(abi.encode(intentData));
+        bytes32 repaymentAddress = _addressToBytes32(RELAYER);
+
+        bytes memory payload = abi.encode(fillHash, intentId, repaymentAddress, DESTINATION_AMOUNT);
 
         uint256 relayerBefore = token.balanceOf(RELAYER);
-        bytes memory payload =
-            abi.encode(intentId, DESTINATION_AMOUNT, _addressToBytes32(RELAYER), RECEIVER_BYTES, DEST_TOKEN);
-        bytes32 commandId = keccak256("cmd");
-        gateway.approve(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
 
-        vm.prank(address(gateway));
-        intents.notify(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
+        // Simulate notify from messenger adapter
+        rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
 
-        Intent memory stored = intents.intents(intentId);
-        assertEq(uint256(stored.status), uint256(IntentStatus.FILLED));
+        Intent memory result = intents.intents(intentId);
+        assertEq(uint256(result.status), uint256(IntentStatus.FILLED));
         assertEq(token.balanceOf(RELAYER), relayerBefore + SOURCE_AMOUNT - _fee());
         assertEq(intents.accumulatedFees(address(token)), _fee());
     }
 
-    function testNotifyCompletesFillFromNew() public {
+    function testNotifySetsFailedOnFillHashMismatch() public {
         bytes32 intentId = _createIntent();
-        uint256 relayerBefore = token.balanceOf(RELAYER_TWO);
-        bytes memory payload =
-            abi.encode(intentId, DESTINATION_AMOUNT, _addressToBytes32(RELAYER_TWO), RECEIVER_BYTES, DEST_TOKEN);
-        bytes32 commandId = keccak256("cmd-new");
-        gateway.approve(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
 
-        vm.prank(address(gateway));
-        intents.notify(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
+        // Create wrong fillHash
+        bytes32 wrongFillHash = keccak256("wrong");
+        bytes32 repaymentAddress = _addressToBytes32(RELAYER);
 
-        Intent memory stored = intents.intents(intentId);
-        assertEq(uint256(stored.status), uint256(IntentStatus.FILLED));
-        assertEq(stored.relayer, RELAYER_TWO);
-        assertEq(token.balanceOf(RELAYER_TWO), relayerBefore + SOURCE_AMOUNT - _fee());
-    }
+        bytes memory payload = abi.encode(wrongFillHash, intentId, repaymentAddress, DESTINATION_AMOUNT);
 
-    function testNotifySetsFailedOnMismatch() public {
-        bytes32 intentId = _createIntent();
-        vm.prank(RELAYER);
-        intents.fill(intentId);
+        rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
 
-        bytes32 wrongReceiver = bytes32(uint256(uint160(address(0xABC))));
-        bytes memory payload =
-            abi.encode(intentId, DESTINATION_AMOUNT, _addressToBytes32(RELAYER), wrongReceiver, DEST_TOKEN);
-        bytes32 commandId = keccak256("cmd-fail");
-        gateway.approve(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
-
-        vm.prank(address(gateway));
-        intents.notify(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
-
-        Intent memory stored = intents.intents(intentId);
-        assertEq(uint256(stored.status), uint256(IntentStatus.FAILED));
+        Intent memory result = intents.intents(intentId);
+        assertEq(uint256(result.status), uint256(IntentStatus.FAILED));
     }
 
     function testNotifyRevertsIfNotMessenger() public {
-        bytes32 intentId = _createIntent();
-        bytes memory payload =
-            abi.encode(intentId, DESTINATION_AMOUNT, _addressToBytes32(RELAYER), RECEIVER_BYTES, DEST_TOKEN);
+        bytes memory payload = abi.encode(bytes32(0), bytes32(0), bytes32(0), uint256(0));
+
         vm.prank(address(0x1234));
-        vm.expectRevert(IRozoIntentsErrors.NotMessenger.selector);
-        intents.notify(bytes32(0), SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
+        vm.expectRevert(IRozoIntentsErrors.InvalidMessenger.selector);
+        intents.notify(0, DEST_CHAIN_ID, payload);
     }
 
-    function testNotifyRevertsIfNotApproved() public {
-        bytes32 intentId = _createIntent();
-        bytes memory payload =
-            abi.encode(intentId, DESTINATION_AMOUNT, _addressToBytes32(RELAYER), RECEIVER_BYTES, DEST_TOKEN);
-        vm.prank(address(gateway));
-        vm.expectRevert(IRozoIntentsErrors.NotApprovedByGateway.selector);
-        intents.notify(bytes32("unknown"), SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
-    }
-
-    function testSlowFillTransfersFundsAndCallsBridge() public {
-        bytes32 intentId = _createIntent();
-        intents.setSlowFillBridge(DEST_CHAIN_ID, address(token), DEST_TOKEN, address(bridge));
-
-        vm.prank(RELAYER);
-        intents.slowFill(intentId);
-
-        Intent memory stored = intents.intents(intentId);
-        assertEq(uint256(stored.status), uint256(IntentStatus.FILLED));
-        assertEq(token.balanceOf(address(intents)), _fee());
-        assertEq(token.balanceOf(address(bridge)), SOURCE_AMOUNT - _fee());
-        MockBridgeAdapter.BridgeCall memory callData = bridge.lastCallData();
-        assertEq(callData.amount, SOURCE_AMOUNT - _fee());
-    }
-
-    function testSlowFillRevertsWhenUnsupported() public {
-        bytes32 intentId = _createIntent();
-        vm.prank(RELAYER);
-        vm.expectRevert(IRozoIntentsErrors.SlowFillUnsupported.selector);
-        intents.slowFill(intentId);
-    }
-
-    function testSlowFillRevertsIfDestinationAmountTooHigh() public {
-        bytes32 intentId = _createIntentWithDestination(SOURCE_AMOUNT);
-        intents.setSlowFillBridge(DEST_CHAIN_ID, address(token), DEST_TOKEN, address(bridge));
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                bytes4(keccak256("InsufficientAmount(uint256,uint256)")), SOURCE_AMOUNT - _fee(), SOURCE_AMOUNT
-            )
-        );
-        vm.prank(RELAYER);
-        intents.slowFill(intentId);
-    }
+    // ============ Refund Tests ============
 
     function testRefundAfterDeadline() public {
         bytes32 intentId = _createIntent();
@@ -237,17 +365,21 @@ contract RozoIntentsTest is Test {
         intents.refund(intentId);
     }
 
-    function testRefundFromFillingState() public {
+    function testRefundRevertsIfNotPending() public {
         bytes32 intentId = _createIntent();
-        vm.prank(RELAYER);
-        intents.fill(intentId);
+
+        // Admin sets to FILLED
+        intents.setIntentStatus(intentId, IntentStatus.FILLED);
 
         vm.warp(block.timestamp + 3 hours);
         vm.prank(SENDER);
+        vm.expectRevert(
+            abi.encodeWithSelector(IRozoIntentsErrors.InvalidStatus.selector, IntentStatus.FILLED, IntentStatus.PENDING)
+        );
         intents.refund(intentId);
-
-        assertEq(uint256(intents.intents(intentId).status), uint256(IntentStatus.REFUNDED));
     }
+
+    // ============ Admin Tests ============
 
     function testAdminRefundByOwner() public {
         bytes32 intentId = _createIntent();
@@ -261,20 +393,34 @@ contract RozoIntentsTest is Test {
         intents.setIntentStatus(intentId, IntentStatus.FAILED);
         assertEq(uint256(intents.intents(intentId).status), uint256(IntentStatus.FAILED));
 
-        intents.setIntentRelayer(intentId, RELAYER);
-        assertEq(intents.intents(intentId).relayer, RELAYER);
+        intents.setIntentRelayer(intentId, _addressToBytes32(RELAYER));
+        assertEq(intents.intents(intentId).relayer, _addressToBytes32(RELAYER));
     }
 
     function testWithdrawFeesSendsBalanceToRecipient() public {
         bytes32 intentId = _createIntent();
-        vm.prank(RELAYER);
-        intents.fill(intentId);
-        bytes memory payload =
-            abi.encode(intentId, DESTINATION_AMOUNT, _addressToBytes32(RELAYER), RECEIVER_BYTES, DEST_TOKEN);
-        bytes32 commandId = keccak256("cmd-fee");
-        gateway.approve(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
-        vm.prank(address(gateway));
-        intents.notify(commandId, SOURCE_CHAIN_NAME, SOURCE_CONTRACT, payload);
+        Intent memory stored = intents.intents(intentId);
+
+        // Build IntentData and complete fill
+        IntentData memory intentData = IntentData({
+            intentId: intentId,
+            sender: _addressToBytes32(stored.sender),
+            refundAddress: _addressToBytes32(stored.refundAddress),
+            sourceToken: _addressToBytes32(stored.sourceToken),
+            sourceAmount: stored.sourceAmount,
+            sourceChainId: block.chainid,
+            destinationChainId: stored.destinationChainId,
+            destinationToken: stored.destinationToken,
+            receiver: stored.receiver,
+            destinationAmount: stored.destinationAmount,
+            deadline: stored.deadline,
+            createdAt: stored.createdAt,
+            relayer: stored.relayer
+        });
+
+        bytes32 fillHash = keccak256(abi.encode(intentData));
+        bytes memory payload = abi.encode(fillHash, intentId, _addressToBytes32(RELAYER), DESTINATION_AMOUNT);
+        rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
 
         uint256 recipientBefore = token.balanceOf(FEE_RECIPIENT);
         intents.withdrawFees(address(token));
@@ -290,44 +436,51 @@ contract RozoIntentsTest is Test {
         intents.setProtocolFee(31);
     }
 
-    function testFillAndNotifyTransfersAndSendsPayload() public {
-        bytes32 intentId = keccak256("dest-intent");
-        vm.startPrank(RELAYER);
-        token.approve(address(intents), DESTINATION_AMOUNT);
-        intents.fillAndNotify{value: 1 ether}(
-            intentId, RECEIVER_BYTES, address(token), DESTINATION_AMOUNT, SOURCE_CHAIN_ID
-        );
-        vm.stopPrank();
+    function testAddAndRemoveRelayer() public {
+        address newRelayer = address(0x9999);
 
-        assertEq(token.balanceOf(RECEIVER), DESTINATION_AMOUNT);
-        MockAxelarGateway.CallData memory callData = gateway.lastCallData();
-        assertEq(keccak256(bytes(callData.destinationChain)), keccak256(bytes(CALLBACK_CHAIN_NAME)));
-        assertEq(keccak256(bytes(callData.destinationAddress)), keccak256(bytes(DEST_CONTRACT)));
+        intents.addRelayer(newRelayer, RelayerType.EXTERNAL);
+        assertEq(uint256(intents.relayers(newRelayer)), uint256(RelayerType.EXTERNAL));
+
+        intents.removeRelayer(newRelayer);
+        assertEq(uint256(intents.relayers(newRelayer)), uint256(RelayerType.NONE));
     }
 
-    function testFillAndNotifyRevertsWithoutChainMapping() public {
-        bytes32 intentId = keccak256("dest-intent2");
-        vm.startPrank(RELAYER);
-        token.approve(address(intents), DESTINATION_AMOUNT);
-        vm.expectRevert(IRozoIntentsErrors.UntrustedSource.selector);
-        intents.fillAndNotify(intentId, RECEIVER_BYTES, address(token), DESTINATION_AMOUNT, 9999);
-        vm.stopPrank();
+    function testSetRozoRelayerAndThreshold() public {
+        address newRozoRelayer = address(0x8888);
+        intents.setRozoRelayer(newRozoRelayer);
+        assertEq(intents.rozoRelayer(), newRozoRelayer);
+
+        intents.setRozoRelayerThreshold(60);
+        assertEq(intents.rozoRelayerThreshold(), 60);
     }
 
-    function testFillAndNotifyRevertsForNonRelayer() public {
-        address stranger = address(0xABBA);
-        token.mint(stranger, DESTINATION_AMOUNT);
-        vm.startPrank(stranger);
-        token.approve(address(intents), DESTINATION_AMOUNT);
-        vm.expectRevert(IRozoIntentsErrors.NotRelayer.selector);
-        intents.fillAndNotify(
-            keccak256("intent-x"), RECEIVER_BYTES, address(token), DESTINATION_AMOUNT, SOURCE_CHAIN_ID
-        );
-        vm.stopPrank();
+    function testSetMessengerAdapter() public {
+        MockMessengerAdapter newAdapter = new MockMessengerAdapter(2, address(intents));
+        intents.setMessengerAdapter(address(newAdapter));
+        assertEq(address(intents.messengerAdapters(2)), address(newAdapter));
     }
+
+    // ============ View Functions Tests ============
+
+    function testViewFunctions() public {
+        assertEq(intents.rozoRelayer(), ROZO_RELAYER);
+        assertEq(intents.rozoRelayerThreshold(), 10);
+        assertEq(intents.protocolFee(), 3);
+        assertEq(intents.feeRecipient(), FEE_RECIPIENT);
+        assertEq(uint256(intents.relayers(RELAYER)), uint256(RelayerType.EXTERNAL));
+        assertEq(address(intents.messengerAdapters(0)), address(rozoAdapter));
+        assertEq(address(intents.messengerAdapters(1)), address(axelarAdapter));
+    }
+
+    // ============ Helper Functions ============
 
     function _createIntent() internal returns (bytes32 intentId) {
-        intentId = keccak256(abi.encodePacked("intent-", block.timestamp));
+        return _createIntentWithRelayer(bytes32(0));
+    }
+
+    function _createIntentWithRelayer(bytes32 relayer) internal returns (bytes32 intentId) {
+        intentId = keccak256(abi.encodePacked("intent-", block.timestamp, relayer));
         vm.startPrank(SENDER);
         token.approve(address(intents), SOURCE_AMOUNT);
         intents.createIntent(
@@ -339,27 +492,28 @@ contract RozoIntentsTest is Test {
             RECEIVER_BYTES,
             DESTINATION_AMOUNT,
             uint64(block.timestamp + 1 hours),
-            REFUND
+            REFUND,
+            relayer
         );
         vm.stopPrank();
     }
 
-    function _createIntentWithDestination(uint256 destinationAmount) internal returns (bytes32 intentId) {
-        intentId = keccak256(abi.encodePacked("intent-dest-", destinationAmount, block.timestamp));
-        vm.startPrank(SENDER);
-        token.approve(address(intents), SOURCE_AMOUNT);
-        intents.createIntent(
-            intentId,
-            address(token),
-            SOURCE_AMOUNT,
-            DEST_CHAIN_ID,
-            DEST_TOKEN,
-            RECEIVER_BYTES,
-            destinationAmount,
-            uint64(block.timestamp + 1 hours),
-            REFUND
-        );
-        vm.stopPrank();
+    function _createIntentData() internal view returns (IntentData memory) {
+        return IntentData({
+            intentId: keccak256("test-intent"),
+            sender: _addressToBytes32(SENDER),
+            refundAddress: _addressToBytes32(REFUND),
+            sourceToken: _addressToBytes32(address(token)),
+            sourceAmount: SOURCE_AMOUNT,
+            sourceChainId: SOURCE_CHAIN_ID,
+            destinationChainId: block.chainid, // Current chain is destination
+            destinationToken: _addressToBytes32(address(token)),
+            receiver: RECEIVER_BYTES,
+            destinationAmount: DESTINATION_AMOUNT,
+            deadline: uint64(block.timestamp + 1 hours),
+            createdAt: uint64(block.timestamp),
+            relayer: bytes32(0) // Open intent
+        });
     }
 
     function _fee() internal view returns (uint256) {

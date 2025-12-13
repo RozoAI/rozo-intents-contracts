@@ -1,20 +1,30 @@
 /**
  * Intent status enum matching contract
+ * PENDING -> FILLED (success) or FAILED (mismatch) or REFUNDED (after deadline)
  */
 export enum IntentStatus {
-  New = 0,
-  Filling = 1,
-  Filled = 2,
-  Failed = 3,
-  Refunded = 4,
+  Pending = 0,
+  Filled = 1,
+  Failed = 2,
+  Refunded = 3,
 }
 
 /**
- * Intent data structure
+ * Relayer type enum matching contract
+ */
+export enum RelayerType {
+  None = 0,
+  Rozo = 1,
+  External = 2,
+}
+
+/**
+ * Intent data structure (stored on source chain)
  */
 export interface Intent {
   intentId: string; // bytes32 as hex
   sender: string;
+  refundAddress: string;
   sourceToken: string;
   sourceAmount: bigint;
   destinationChainId: number;
@@ -22,9 +32,37 @@ export interface Intent {
   receiver: string; // bytes32
   destinationAmount: bigint;
   deadline: number;
+  createdAt: number;
   status: IntentStatus;
-  relayer?: string;
-  refundAddress?: string;
+  relayer: string; // bytes32 (0x0 = open)
+}
+
+/**
+ * IntentData structure (passed to fillAndNotify)
+ * Full intent data for cross-chain verification
+ */
+export interface IntentData {
+  intentId: string; // bytes32
+  sender: string; // bytes32
+  refundAddress: string; // bytes32
+  sourceToken: string; // bytes32
+  sourceAmount: bigint;
+  sourceChainId: number;
+  destinationChainId: number;
+  destinationToken: string; // bytes32
+  receiver: string; // bytes32
+  destinationAmount: bigint;
+  deadline: number;
+  createdAt: number;
+  relayer: string; // bytes32
+}
+
+/**
+ * FillRecord structure (stored on destination chain)
+ */
+export interface FillRecord {
+  relayer: string; // address
+  repaymentAddress: string; // bytes32
 }
 
 /**
@@ -47,6 +85,7 @@ export interface RelayerConfig {
   evmPrivateKey: string;
   stellarSecretKey: string;
   chains: ChainConfig[];
+  defaultMessengerId: number; // 0 = Rozo, 1 = Axelar
 }
 
 /**
