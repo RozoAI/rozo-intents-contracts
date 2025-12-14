@@ -711,6 +711,15 @@ fn compute_fill_hash(env: &Env, intent_data: &IntentData) -> BytesN<32> {
 
 /// Convert Stellar Address to bytes32 for cross-chain compatibility
 ///
+/// This function extracts the raw 32-byte identifier from a Stellar address:
+/// - For Account addresses (G...): extracts the 32-byte Ed25519 public key
+/// - For Contract addresses (C...): extracts the 32-byte contract ID
+///
+/// IMPORTANT: This encoding does NOT preserve the address type (account vs contract).
+/// The caller must track the address type separately if round-trip conversion is needed.
+/// For cross-chain use, this is typically handled by context (e.g., receiver addresses
+/// are known to be of a specific type based on the destination chain).
+///
 /// XDR format for ScAddress:
 /// - Account: 4 bytes (discriminant=0) + 4 bytes (PublicKeyType::Ed25519=0) + 32 bytes (Ed25519 key) = 40 bytes
 /// - Contract: 4 bytes (discriminant=1) + 32 bytes (contract ID) = 36 bytes
@@ -728,15 +737,19 @@ fn address_to_bytes32(env: &Env, addr: &Address) -> BytesN<32> {
     };
 
     if discriminant == 0 {
-        // Account address: skip 8 bytes (4 discriminant + 4 PublicKeyType) to get 32-byte Ed25519 key
+        // Account address (G...)
+        // XDR: 4 bytes discriminant + 4 bytes PublicKeyType + 32 bytes Ed25519 key
         if len >= 40 {
+            // Copy all 32 bytes of the Ed25519 key (starting at offset 8)
             for i in 0..32 {
                 result[i] = addr_bytes.get((8 + i) as u32).unwrap_or(0);
             }
         }
     } else {
-        // Contract address: skip 4 bytes (discriminant) to get 32-byte contract ID
+        // Contract address (C...)
+        // XDR: 4 bytes discriminant + 32 bytes contract ID
         if len >= 36 {
+            // Copy all 32 bytes of the contract ID (starting at offset 4)
             for i in 0..32 {
                 result[i] = addr_bytes.get((4 + i) as u32).unwrap_or(0);
             }
@@ -748,48 +761,66 @@ fn address_to_bytes32(env: &Env, addr: &Address) -> BytesN<32> {
 
 /// Convert bytes32 to Stellar Address
 ///
+/// This function converts a raw 32-byte identifier to a Stellar address.
+/// Since bytes32 doesn't contain type information, this function uses the
+/// `is_account` parameter to determine the address type.
+///
+/// @param bytes The 32-byte identifier (Ed25519 key or contract ID)
+/// @param is_account If true, creates an Account address (G...); if false, creates a Contract address (C...)
+///
 /// XDR format for ScAddress:
 /// - Account: 4 bytes (discriminant=0) + 4 bytes (PublicKeyType::Ed25519=0) + 32 bytes (Ed25519 key) = 40 bytes
 /// - Contract: 4 bytes (discriminant=1) + 32 bytes (contract ID) = 36 bytes
-///
-/// @param is_contract If true, creates a contract address; if false, creates an account address
-fn bytes32_to_address(env: &Env, bytes: &BytesN<32>) -> Address {
+fn bytes32_to_address_typed(env: &Env, bytes: &BytesN<32>, is_account: bool) -> Address {
     let bytes_arr = bytes.to_array();
 
-    // First try as contract address (more common for cross-chain)
-    // XDR format: 4-byte discriminant (0,0,0,1) + 32-byte contract ID = 36 bytes
-    let mut contract_xdr = [0u8; 36];
-    contract_xdr[0] = 0;
-    contract_xdr[1] = 0;
-    contract_xdr[2] = 0;
-    contract_xdr[3] = 1; // ScAddress::Contract variant
-    for i in 0..32 {
-        contract_xdr[4 + i] = bytes_arr[i];
-    }
+    if is_account {
+        // Reconstruct account address
+        let mut account_xdr = [0u8; 40];
+        account_xdr[0] = 0;
+        account_xdr[1] = 0;
+        account_xdr[2] = 0;
+        account_xdr[3] = 0; // ScAddress::Account variant
+        account_xdr[4] = 0;
+        account_xdr[5] = 0;
+        account_xdr[6] = 0;
+        account_xdr[7] = 0; // PublicKeyType::Ed25519 variant
+        for i in 0..32 {
+            account_xdr[8 + i] = bytes_arr[i];
+        }
 
-    let xdr = Bytes::from_array(env, &contract_xdr);
-    if let Ok(addr) = Address::from_xdr(env, &xdr) {
-        return addr;
-    }
+        let xdr = Bytes::from_array(env, &account_xdr);
+        Address::from_xdr(env, &xdr)
+            .expect("Failed to construct account address from bytes32")
+    } else {
+        // Reconstruct contract address
+        let mut contract_xdr = [0u8; 36];
+        contract_xdr[0] = 0;
+        contract_xdr[1] = 0;
+        contract_xdr[2] = 0;
+        contract_xdr[3] = 1; // ScAddress::Contract variant
+        for i in 0..32 {
+            contract_xdr[4 + i] = bytes_arr[i];
+        }
 
-    // Fallback: try as account address
-    // XDR format: 4-byte discriminant (0,0,0,0) + 4-byte PublicKeyType (0,0,0,0) + 32-byte Ed25519 key = 40 bytes
-    let mut account_xdr = [0u8; 40];
-    account_xdr[0] = 0;
-    account_xdr[1] = 0;
-    account_xdr[2] = 0;
-    account_xdr[3] = 0; // ScAddress::Account variant
-    account_xdr[4] = 0;
-    account_xdr[5] = 0;
-    account_xdr[6] = 0;
-    account_xdr[7] = 0; // PublicKeyType::Ed25519 variant
-    for i in 0..32 {
-        account_xdr[8 + i] = bytes_arr[i];
+        let xdr = Bytes::from_array(env, &contract_xdr);
+        Address::from_xdr(env, &xdr)
+            .expect("Failed to construct contract address from bytes32")
     }
+}
 
-    let xdr_account = Bytes::from_array(env, &account_xdr);
-    Address::from_xdr(env, &xdr_account)
-        .expect("Failed to construct address from bytes32")
+/// Convert bytes32 to Stellar Address (defaults to Contract address)
+///
+/// For cross-chain compatibility, bytes32 values are assumed to be CONTRACT addresses
+/// by default, since:
+/// 1. Token contracts are always Contract addresses
+/// 2. Cross-chain receivers should use Contract addresses for better compatibility
+///
+/// If you need to convert to an Account address, use `bytes32_to_address_typed` instead.
+fn bytes32_to_address(env: &Env, bytes: &BytesN<32>) -> Address {
+    // Default to contract address for cross-chain compatibility
+    // Users who need to receive at an account address should provide the type explicitly
+    bytes32_to_address_typed(env, bytes, false)
 }
 
 /// Encode notify payload for cross-chain notification
