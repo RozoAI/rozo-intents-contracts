@@ -63,7 +63,7 @@ interface IMessengerAdapter {
 
     /// @notice Get the messenger ID (0=Rozo, 1=Axelar)
     /// @return Messenger identifier
-    function messengerId() external pure returns (uint8);
+    function messengerId() external view returns (uint8);
 
     /// @notice Get the trusted contract address for a chain
     /// @param chainId Chain ID to query

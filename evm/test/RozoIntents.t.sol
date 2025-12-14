@@ -114,9 +114,9 @@ contract RozoIntentsTest is Test {
 
         // Check fill record was stored
         bytes32 fillHash = keccak256(abi.encode(intentData));
-        FillRecord memory record = intents.filledIntents(fillHash);
-        assertEq(record.relayer, RELAYER);
-        assertEq(record.repaymentAddress, _addressToBytes32(RELAYER));
+        (address filledRelayer, bytes32 filledRepaymentAddress) = intents.filledIntents(fillHash);
+        assertEq(filledRelayer, RELAYER);
+        assertEq(filledRepaymentAddress, _addressToBytes32(RELAYER));
     }
 
     function testFillAndNotifyWithDifferentRepaymentAddress() public {
@@ -129,8 +129,8 @@ contract RozoIntentsTest is Test {
         vm.stopPrank();
 
         bytes32 fillHash = keccak256(abi.encode(intentData));
-        FillRecord memory record = intents.filledIntents(fillHash);
-        assertEq(record.repaymentAddress, repaymentAddress);
+        (, bytes32 filledRepaymentAddress) = intents.filledIntents(fillHash);
+        assertEq(filledRepaymentAddress, repaymentAddress);
     }
 
     function testFillAndNotifyRevertsForNonRelayer() public {
@@ -191,6 +191,9 @@ contract RozoIntentsTest is Test {
     }
 
     function testFillAndNotifyRozoFallbackWorks() public {
+        // Warp to a reasonable timestamp to avoid underflow
+        vm.warp(1000);
+
         IntentData memory intentData = _createIntentData();
         intentData.relayer = _addressToBytes32(RELAYER); // Assign to RELAYER
         intentData.createdAt = uint64(block.timestamp - 15); // Created 15 seconds ago
@@ -205,6 +208,9 @@ contract RozoIntentsTest is Test {
     }
 
     function testFillAndNotifyRozoFallbackRevertsBeforeThreshold() public {
+        // Warp to a reasonable timestamp to avoid underflow
+        vm.warp(1000);
+
         IntentData memory intentData = _createIntentData();
         intentData.relayer = _addressToBytes32(RELAYER); // Assign to RELAYER
         intentData.createdAt = uint64(block.timestamp - 5); // Created 5 seconds ago
@@ -227,8 +233,8 @@ contract RozoIntentsTest is Test {
         vm.stopPrank();
 
         // Check that Axelar adapter received the message
-        MockMessengerAdapter.SentMessage memory sent = axelarAdapter.lastSentMessage();
-        assertEq(sent.destinationChainId, intentData.sourceChainId);
+        (uint256 destChainId,,) = axelarAdapter.lastSentMessage();
+        assertEq(destChainId, intentData.sourceChainId);
     }
 
     function testFillAndNotifyRevertsInvalidMessenger() public {
@@ -256,8 +262,8 @@ contract RozoIntentsTest is Test {
         vm.stopPrank();
 
         // Check Axelar adapter received retry message
-        MockMessengerAdapter.SentMessage memory sent = axelarAdapter.lastSentMessage();
-        assertEq(sent.destinationChainId, intentData.sourceChainId);
+        (uint256 destChainId,,) = axelarAdapter.lastSentMessage();
+        assertEq(destChainId, intentData.sourceChainId);
     }
 
     function testRetryNotifyRevertsIfNotFilled() public {
@@ -307,8 +313,10 @@ contract RozoIntentsTest is Test {
 
         bytes32 fillHash = keccak256(abi.encode(intentData));
         bytes32 repaymentAddress = _addressToBytes32(RELAYER);
+        bytes32 relayerBytes32 = _addressToBytes32(RELAYER);
 
-        bytes memory payload = abi.encode(fillHash, intentId, repaymentAddress, DESTINATION_AMOUNT);
+        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount
+        bytes memory payload = abi.encode(intentId, fillHash, repaymentAddress, relayerBytes32, DESTINATION_AMOUNT);
 
         uint256 relayerBefore = token.balanceOf(RELAYER);
 
@@ -327,8 +335,10 @@ contract RozoIntentsTest is Test {
         // Create wrong fillHash
         bytes32 wrongFillHash = keccak256("wrong");
         bytes32 repaymentAddress = _addressToBytes32(RELAYER);
+        bytes32 relayerBytes32 = _addressToBytes32(RELAYER);
 
-        bytes memory payload = abi.encode(wrongFillHash, intentId, repaymentAddress, DESTINATION_AMOUNT);
+        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount
+        bytes memory payload = abi.encode(intentId, wrongFillHash, repaymentAddress, relayerBytes32, DESTINATION_AMOUNT);
 
         rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
 
@@ -337,10 +347,10 @@ contract RozoIntentsTest is Test {
     }
 
     function testNotifyRevertsIfNotMessenger() public {
-        bytes memory payload = abi.encode(bytes32(0), bytes32(0), bytes32(0), uint256(0));
+        bytes memory payload = abi.encode(bytes32(0), bytes32(0), bytes32(0), bytes32(0), uint256(0));
 
         vm.prank(address(0x1234));
-        vm.expectRevert(IRozoIntentsErrors.InvalidMessenger.selector);
+        vm.expectRevert(IRozoIntentsErrors.NotMessenger.selector);
         intents.notify(0, DEST_CHAIN_ID, payload);
     }
 
@@ -419,7 +429,9 @@ contract RozoIntentsTest is Test {
         });
 
         bytes32 fillHash = keccak256(abi.encode(intentData));
-        bytes memory payload = abi.encode(fillHash, intentId, _addressToBytes32(RELAYER), DESTINATION_AMOUNT);
+        bytes32 relayerBytes32 = _addressToBytes32(RELAYER);
+        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount
+        bytes memory payload = abi.encode(intentId, fillHash, relayerBytes32, relayerBytes32, DESTINATION_AMOUNT);
         rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
 
         uint256 recipientBefore = token.balanceOf(FEE_RECIPIENT);

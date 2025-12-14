@@ -6,7 +6,7 @@ import {IMessengerAdapter} from "../../src/interfaces/IMessengerAdapter.sol";
 /// @title MockMessengerAdapter
 /// @notice Mock implementation of messenger adapter for testing
 contract MockMessengerAdapter is IMessengerAdapter {
-    uint8 private _messengerId;
+    uint8 private immutable _messengerId;
     address public rozoIntents;
     mapping(uint256 => bytes32) private _trustedContracts;
 

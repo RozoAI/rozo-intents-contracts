@@ -2,20 +2,24 @@ import { ethers, Contract, Wallet, Provider } from 'ethers';
 import { Intent, IntentData, IntentStatus, ChainConfig, FillResult } from './types';
 
 // ABI for RozoIntents contract (minimal required functions)
+// Updated to match the actual contract interface
 const ROZO_INTENTS_ABI = [
   // Events
   'event IntentCreated(bytes32 indexed intentId, address indexed sender, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 receiver, uint256 destinationAmount, uint64 deadline, bytes32 relayer)',
-  'event IntentFilled(bytes32 indexed intentId, address indexed relayer, uint256 amountPaid)',
+  'event IntentFilled(bytes32 indexed intentId, bytes32 indexed relayer, bytes32 repaymentAddress, uint256 amountPaid)',
   'event IntentRefunded(bytes32 indexed intentId, address indexed refundAddress, uint256 amount)',
   'event FillAndNotifySent(bytes32 indexed intentId, address indexed relayer, bytes32 repaymentAddress, uint8 messengerId)',
   'event RetryNotifySent(bytes32 indexed intentId, address indexed relayer, uint8 messengerId)',
 
-  // View functions
-  'function getIntent(bytes32 intentId) external view returns (tuple(bytes32 intentId, address sender, address refundAddress, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint64 createdAt, uint8 status, bytes32 relayer))',
-  'function getRelayerType(address relayer) external view returns (uint8)',
-  'function chainId() external view returns (uint256)',
+  // View functions - match contract public getters
+  'function intents(bytes32 intentId) external view returns (tuple(bytes32 intentId, address sender, address refundAddress, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint64 createdAt, uint8 status, bytes32 relayer))',
+  'function relayers(address relayer) external view returns (uint8)',
+  'function filledIntents(bytes32 fillHash) external view returns (address relayer, bytes32 repaymentAddress)',
+  'function rozoRelayer() external view returns (address)',
+  'function rozoRelayerThreshold() external view returns (uint256)',
+  'function protocolFee() external view returns (uint256)',
 
-  // Relayer functions - new signatures
+  // Relayer functions
   'function fillAndNotify(tuple(bytes32 intentId, bytes32 sender, bytes32 refundAddress, bytes32 sourceToken, uint256 sourceAmount, uint256 sourceChainId, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint64 createdAt, bytes32 relayer) intentData, bytes32 repaymentAddress, uint8 messengerId) external payable',
   'function retryNotify(tuple(bytes32 intentId, bytes32 sender, bytes32 refundAddress, bytes32 sourceToken, uint256 sourceAmount, uint256 sourceChainId, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, uint256 destinationAmount, uint64 deadline, uint64 createdAt, bytes32 relayer) intentData, uint8 messengerId) external payable',
 ];
@@ -65,25 +69,33 @@ export class EvmClient {
 
   /**
    * Check if this relayer is whitelisted (has RelayerType > 0)
+   * Uses the `relayers` public mapping getter
    */
   async isWhitelisted(): Promise<boolean> {
-    const relayerType = await this.contract.getRelayerType(this.wallet.address);
+    const relayerType = await this.contract.relayers(this.wallet.address);
     return Number(relayerType) > 0;
   }
 
   /**
-   * Get the chain ID from the contract
+   * Get the chain ID from the provider
+   * Note: contract doesn't expose chainId(), we get it from the provider
    */
   async getChainId(): Promise<number> {
-    return Number(await this.contract.chainId());
+    const network = await this.provider.getNetwork();
+    return Number(network.chainId);
   }
 
   /**
    * Get intent by ID
+   * Uses the `intents` public mapping getter
    */
   async getIntent(intentId: string): Promise<Intent | null> {
     try {
-      const result = await this.contract.getIntent(intentId);
+      const result = await this.contract.intents(intentId);
+      // Check if intent exists (sender != address(0))
+      if (result.sender === '0x0000000000000000000000000000000000000000') {
+        return null;
+      }
       return {
         intentId: result.intentId,
         sender: result.sender,

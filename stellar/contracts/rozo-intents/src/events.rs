@@ -28,10 +28,16 @@ pub fn emit_intent_created(
     );
 }
 
-pub fn emit_intent_filled(env: &Env, intent_id: BytesN<32>, relayer: BytesN<32>, amount_paid: i128) {
+pub fn emit_intent_filled(
+    env: &Env,
+    intent_id: BytesN<32>,
+    relayer: BytesN<32>,
+    repayment_address: BytesN<32>,
+    amount_paid: i128,
+) {
     env.events().publish(
         (Symbol::new(env, "intent_filled"), intent_id),
-        (relayer, amount_paid),
+        (relayer, repayment_address, amount_paid),
     );
 }
 

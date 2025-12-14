@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {IMessengerAdapter} from "./IMessengerAdapter.sol";
+
 /// @title Intent Status Enum
 /// @notice PENDING -> FILLED (success) or FAILED (mismatch) or REFUNDED (after deadline)
 enum IntentStatus {
@@ -233,8 +235,8 @@ interface IRozoIntentsAdmin {
 interface IRozoIntentsView {
     function intents(bytes32 intentId) external view returns (Intent memory);
     function relayers(address relayer) external view returns (RelayerType);
-    function messengerAdapters(uint8 messengerId) external view returns (address);
-    function filledIntents(bytes32 fillHash) external view returns (FillRecord memory);
+    function messengerAdapters(uint8 messengerId) external view returns (IMessengerAdapter);
+    function filledIntents(bytes32 fillHash) external view returns (address relayer, bytes32 repaymentAddress);
     function rozoRelayer() external view returns (address);
     function rozoRelayerThreshold() external view returns (uint256);
     function protocolFee() external view returns (uint256);

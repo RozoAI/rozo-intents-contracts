@@ -205,10 +205,14 @@ contract RozoIntents is
         IMessengerAdapter adapter = messengerAdapters[messengerId];
         if (address(adapter) == address(0)) revert InvalidMessenger();
 
+        // Build payload with relayer identity for attribution
+        // Format: intentId, fillHash, repaymentAddress, relayer, amount
+        bytes32 relayerBytes32 = _addressToBytes32(msg.sender);
         bytes memory payload = abi.encode(
-            fillHash,
             intentData.intentId,
+            fillHash,
             repaymentAddress,
+            relayerBytes32,
             intentData.destinationAmount
         );
 
@@ -236,11 +240,14 @@ contract RozoIntents is
         IMessengerAdapter adapter = messengerAdapters[messengerId];
         if (address(adapter) == address(0)) revert InvalidMessenger();
 
-        // Resend notification
+        // Build payload with relayer identity for attribution
+        // Format: intentId, fillHash, repaymentAddress, relayer, amount
+        bytes32 relayerBytes32 = _addressToBytes32(msg.sender);
         bytes memory payload = abi.encode(
-            fillHash,
             intentData.intentId,
+            fillHash,
             record.repaymentAddress,
+            relayerBytes32,
             intentData.destinationAmount
         );
 
@@ -265,10 +272,12 @@ contract RozoIntents is
         // Verify and decode message
         bytes memory payload = adapter.verifyMessage(sourceChainId, messageData);
 
-        (bytes32 fillHash, bytes32 intentId, bytes32 repaymentAddress, uint256 amountPaid) =
-            abi.decode(payload, (bytes32, bytes32, bytes32, uint256));
+        // Decode payload with relayer identity
+        // Format: intentId, fillHash, repaymentAddress, relayer, amount
+        (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress, bytes32 relayer, uint256 amountPaid) =
+            abi.decode(payload, (bytes32, bytes32, bytes32, bytes32, uint256));
 
-        _completeFill(intentId, fillHash, repaymentAddress, amountPaid);
+        _completeFill(intentId, fillHash, repaymentAddress, relayer, amountPaid);
     }
 
     // ============ Admin Functions ============
@@ -390,6 +399,7 @@ contract RozoIntents is
         bytes32 intentId,
         bytes32 fillHash,
         bytes32 repaymentAddress,
+        bytes32 relayer,
         uint256 amountPaid
     ) internal {
         Intent storage intent = _requireIntent(intentId);
@@ -443,7 +453,8 @@ contract RozoIntents is
 
         IERC20(intent.sourceToken).safeTransfer(payoutAddress, relayerPayout);
 
-        emit IntentFilled(intentId, repaymentAddress, repaymentAddress, amountPaid);
+        // Emit IntentFilled with relayer identity for attribution
+        emit IntentFilled(intentId, relayer, repaymentAddress, amountPaid);
     }
 
     /// @notice Check if caller qualifies as Rozo fallback
