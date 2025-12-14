@@ -65,7 +65,7 @@ pub fn emit_fill_and_notify_sent(
     intent_id: BytesN<32>,
     relayer: Address,
     repayment_address: BytesN<32>,
-    messenger_id: u8,
+    messenger_id: u32,
 ) {
     env.events().publish(
         (Symbol::new(env, "fill_and_notify_sent"), intent_id),
@@ -77,7 +77,7 @@ pub fn emit_retry_notify_sent(
     env: &Env,
     intent_id: BytesN<32>,
     relayer: Address,
-    messenger_id: u8,
+    messenger_id: u32,
 ) {
     env.events().publish(
         (Symbol::new(env, "retry_notify_sent"), intent_id),
@@ -131,7 +131,7 @@ pub fn emit_relayer_removed(env: &Env, relayer: Address) {
         .publish((Symbol::new(env, "relayer_removed"),), relayer);
 }
 
-pub fn emit_messenger_adapter_set(env: &Env, messenger_id: u8, adapter: Address) {
+pub fn emit_messenger_adapter_set(env: &Env, messenger_id: u32, adapter: Address) {
     env.events()
         .publish((Symbol::new(env, "messenger_adapter_set"),), (messenger_id, adapter));
 }

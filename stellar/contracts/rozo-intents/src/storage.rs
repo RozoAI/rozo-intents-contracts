@@ -40,7 +40,7 @@ fn relayer_key(relayer: &Address) -> (soroban_sdk::Symbol, Address) {
     (symbol_short!("RELAYER"), relayer.clone())
 }
 
-fn messenger_adapter_key(messenger_id: u8) -> (soroban_sdk::Symbol, u8) {
+fn messenger_adapter_key(messenger_id: u32) -> (soroban_sdk::Symbol, u32) {
     (symbol_short!("MSG_ADP"), messenger_id)
 }
 
@@ -171,13 +171,13 @@ pub fn is_relayer(env: &Env, relayer: &Address) -> bool {
 }
 
 // Messenger Adapters (by messengerId)
-pub fn get_messenger_adapter(env: &Env, messenger_id: u8) -> Option<Address> {
+pub fn get_messenger_adapter(env: &Env, messenger_id: u32) -> Option<Address> {
     env.storage()
         .instance()
         .get(&messenger_adapter_key(messenger_id))
 }
 
-pub fn set_messenger_adapter(env: &Env, messenger_id: u8, adapter: &Address) {
+pub fn set_messenger_adapter(env: &Env, messenger_id: u32, adapter: &Address) {
     env.storage()
         .instance()
         .set(&messenger_adapter_key(messenger_id), adapter);
@@ -260,6 +260,7 @@ pub fn store_outbound_message(
     env.storage().temporary().set(&outbound_key(), &messages);
 }
 
+#[allow(dead_code)]
 pub fn get_outbound_messages(env: &Env) -> Vec<OutboundMessage> {
     env.storage()
         .temporary()

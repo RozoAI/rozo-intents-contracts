@@ -16,7 +16,9 @@ import "../src/RozoIntents.sol";
 /// - INTENT_ID, SENDER, REFUND_ADDRESS, SOURCE_TOKEN, SOURCE_AMOUNT
 /// - SOURCE_CHAIN_ID, DEST_CHAIN_ID, DEST_TOKEN, RECEIVER, DEST_AMOUNT
 /// - DEADLINE, CREATED_AT, RELAYER (all as bytes32/uint types)
+/// - RECEIVER_IS_ACCOUNT: bool - whether receiver is a Stellar account
 /// - REPAYMENT_ADDRESS: bytes32 - where to receive payment on source chain
+/// - REPAYMENT_IS_ACCOUNT: bool - whether repayment address is a Stellar account
 /// - MESSENGER_ID: uint8 - 0=Rozo, 1=Axelar
 /// - NATIVE_GAS: uint256 (optional) - ETH to send for messenger fees
 contract RelayerScript is Script {
@@ -39,11 +41,12 @@ contract RelayerScript is Script {
     function _fillAndNotify(address contractAddress) internal {
         IntentData memory intentData = _buildIntentData();
         bytes32 repaymentAddress = vm.envBytes32("REPAYMENT_ADDRESS");
+        bool repaymentIsAccount = vm.envOr("REPAYMENT_IS_ACCOUNT", false);
         uint8 messengerId = uint8(vm.envUint("MESSENGER_ID"));
         uint256 nativeGas = vm.envOr("NATIVE_GAS", uint256(0));
 
         RozoIntents rozo = RozoIntents(contractAddress);
-        rozo.fillAndNotify{value: nativeGas}(intentData, repaymentAddress, messengerId);
+        rozo.fillAndNotify{value: nativeGas}(intentData, repaymentAddress, repaymentIsAccount, messengerId);
     }
 
     function _retryNotify(address contractAddress) internal {
@@ -69,7 +72,8 @@ contract RelayerScript is Script {
             destinationAmount: vm.envUint("DEST_AMOUNT"),
             deadline: uint64(vm.envUint("DEADLINE")),
             createdAt: uint64(vm.envUint("CREATED_AT")),
-            relayer: vm.envBytes32("RELAYER")
+            relayer: vm.envBytes32("RELAYER"),
+            receiverIsAccount: vm.envOr("RECEIVER_IS_ACCOUNT", false)
         });
     }
 

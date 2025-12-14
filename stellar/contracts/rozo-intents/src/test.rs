@@ -1,11 +1,11 @@
 #![cfg(test)]
 
 use super::*;
-use crate::types::{IntentData, IntentStatus, RelayerType};
+use crate::types::{CreateIntentParams, IntentStatus, RelayerType};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, BytesN, Env, IntoVal, String,
+    Address, BytesN, Env, String,
 };
 
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, TokenClient<'a>) {
@@ -56,14 +56,15 @@ fn setup_env() -> (
     client.initialize(&owner, &owner, &1500u64);
 
     // Configure
-    client.set_protocol_fee(&3); // 3 bps
-    client.add_relayer(&relayer, &RelayerType::External);
+    client.set_protocol_fee(&owner, &3); // 3 bps
+    client.add_relayer(&owner, &relayer, &RelayerType::External);
     client.set_trusted_contract(
+        &owner,
         &String::from_str(&env, "base"),
         &String::from_str(&env, "0x123..."),
     );
-    client.set_chain_id_to_name(&8453u64, &String::from_str(&env, "base"));
-    client.set_chain_id_to_name(&1500u64, &String::from_str(&env, "stellar"));
+    client.set_chain_id_to_name(&owner, &8453u64, &String::from_str(&env, "base"));
+    client.set_chain_id_to_name(&owner, &1500u64, &String::from_str(&env, "stellar"));
 
     (
         env,
@@ -121,21 +122,20 @@ fn test_create_intent() {
     });
 
     // Create intent with open relayer (zeros)
-    // Args: sender, intent_id, source_token, source_amount, destination_chain_id,
-    //       destination_token, receiver, destination_amount, deadline, refund_address, relayer
-    client.create_intent(
-        &sender,
-        &intent_id,
-        &token,
-        &1_000_000_000i128, // 100 USDC
-        &8453u64,           // Base chain ID
-        &token_bytes,
-        &receiver_bytes,
-        &990_000_000i128, // 99 USDC
-        &2000u64,         // deadline
-        &sender,          // refund_address
-        &zero_relayer,    // open to any relayer
-    );
+    let params = CreateIntentParams {
+        intent_id: intent_id.clone(),
+        source_token: token.clone(),
+        source_amount: 1_000_000_000i128, // 100 USDC
+        destination_chain_id: 8453u64,    // Base chain ID
+        destination_token: token_bytes,
+        receiver: receiver_bytes,
+        receiver_is_account: false,
+        destination_amount: 990_000_000i128, // 99 USDC
+        deadline: 2000u64,
+        refund_address: sender.clone(),
+        relayer: zero_relayer, // open to any relayer
+    };
+    client.create_intent(&sender, &params);
 
     // Verify intent was created
     let intent = client.get_intent(&intent_id);
@@ -146,7 +146,7 @@ fn test_create_intent() {
 
 #[test]
 fn test_create_intent_with_assigned_relayer() {
-    let (env, contract, _owner, sender, receiver, relayer, token, _token_client) = setup_env();
+    let (env, contract, _owner, sender, receiver, _relayer, token, _token_client) = setup_env();
 
     let client = RozoIntentsContractClient::new(&env, &contract);
     let intent_id = generate_intent_id(&env);
@@ -161,19 +161,20 @@ fn test_create_intent_with_assigned_relayer() {
     });
 
     // Create intent with specific relayer
-    client.create_intent(
-        &sender,
-        &intent_id,
-        &token,
-        &1_000_000_000i128,
-        &8453u64,
-        &token_bytes,
-        &receiver_bytes,
-        &990_000_000i128,
-        &2000u64,
-        &sender,
-        &relayer_bytes, // assigned relayer
-    );
+    let params = CreateIntentParams {
+        intent_id: intent_id.clone(),
+        source_token: token.clone(),
+        source_amount: 1_000_000_000i128,
+        destination_chain_id: 8453u64,
+        destination_token: token_bytes,
+        receiver: receiver_bytes,
+        receiver_is_account: false,
+        destination_amount: 990_000_000i128,
+        deadline: 2000u64,
+        refund_address: sender.clone(),
+        relayer: relayer_bytes.clone(), // assigned relayer
+    };
+    client.create_intent(&sender, &params);
 
     // Verify intent has relayer assigned
     let intent = client.get_intent(&intent_id);
@@ -200,19 +201,20 @@ fn test_refund_after_deadline() {
 
     // Create intent
     let amount = 1_000_000_000i128;
-    client.create_intent(
-        &sender,
-        &intent_id,
-        &token,
-        &amount,
-        &8453u64,
-        &token_bytes,
-        &receiver_bytes,
-        &990_000_000i128,
-        &2000u64,
-        &sender,
-        &zero_relayer,
-    );
+    let params = CreateIntentParams {
+        intent_id: intent_id.clone(),
+        source_token: token.clone(),
+        source_amount: amount,
+        destination_chain_id: 8453u64,
+        destination_token: token_bytes,
+        receiver: receiver_bytes,
+        receiver_is_account: false,
+        destination_amount: 990_000_000i128,
+        deadline: 2000u64,
+        refund_address: sender.clone(),
+        relayer: zero_relayer,
+    };
+    client.create_intent(&sender, &params);
 
     // Verify tokens were transferred
     assert_eq!(token_client.balance(&sender), initial_balance - amount);
@@ -234,17 +236,17 @@ fn test_refund_after_deadline() {
 
 #[test]
 fn test_admin_functions() {
-    let (env, contract, _owner, _sender, _receiver, _relayer, _token, _token_client) = setup_env();
+    let (env, contract, owner, _sender, _receiver, _relayer, _token, _token_client) = setup_env();
 
     let client = RozoIntentsContractClient::new(&env, &contract);
 
     // Set protocol fee
-    client.set_protocol_fee(&10);
+    client.set_protocol_fee(&owner, &10);
     assert_eq!(client.get_protocol_fee(), 10);
 
     // Add/remove relayer with RelayerType
     let new_relayer = Address::generate(&env);
-    client.add_relayer(&new_relayer, &RelayerType::External);
+    client.add_relayer(&owner, &new_relayer, &RelayerType::External);
     assert!(client.is_relayer(&new_relayer));
 
     // Check relayer type
@@ -253,15 +255,16 @@ fn test_admin_functions() {
 
     // Add Rozo relayer
     let rozo_relayer = Address::generate(&env);
-    client.add_relayer(&rozo_relayer, &RelayerType::Rozo);
+    client.add_relayer(&owner, &rozo_relayer, &RelayerType::Rozo);
     let rozo_type = client.get_relayer_type(&rozo_relayer);
     assert_eq!(rozo_type, RelayerType::Rozo);
 
-    client.remove_relayer(&new_relayer);
+    client.remove_relayer(&owner, &new_relayer);
     assert!(!client.is_relayer(&new_relayer));
 
     // Set trusted contract
     client.set_trusted_contract(
+        &owner,
         &String::from_str(&env, "ethereum"),
         &String::from_str(&env, "0x456..."),
     );
@@ -269,24 +272,24 @@ fn test_admin_functions() {
 
 #[test]
 fn test_rozo_relayer_config() {
-    let (env, contract, _owner, _sender, _receiver, _relayer, _token, _token_client) = setup_env();
+    let (env, contract, owner, _sender, _receiver, _relayer, _token, _token_client) = setup_env();
 
     let client = RozoIntentsContractClient::new(&env, &contract);
 
     // Set Rozo relayer
     let rozo = Address::generate(&env);
-    client.set_rozo_relayer(&rozo);
+    client.set_rozo_relayer(&owner, &rozo);
 
     // Set Rozo threshold (e.g., 300 seconds = 5 minutes)
-    client.set_rozo_relayer_threshold(&300u64);
+    client.set_rozo_threshold(&owner, &300u64);
 
-    // Verify settings (these would need getter functions in the contract)
-    // For now, we just verify no errors occurred
+    // Verify settings
+    assert_eq!(client.get_rozo_threshold(), 300);
 }
 
 #[test]
 fn test_admin_refund() {
-    let (env, contract, _owner, sender, receiver, _relayer, token, token_client) = setup_env();
+    let (env, contract, owner, sender, receiver, _relayer, token, token_client) = setup_env();
 
     let client = RozoIntentsContractClient::new(&env, &contract);
     let intent_id = generate_intent_id(&env);
@@ -303,22 +306,23 @@ fn test_admin_refund() {
 
     // Create intent
     let amount = 1_000_000_000i128;
-    client.create_intent(
-        &sender,
-        &intent_id,
-        &token,
-        &amount,
-        &8453u64,
-        &token_bytes,
-        &receiver_bytes,
-        &990_000_000i128,
-        &2000u64,
-        &sender,
-        &zero_relayer,
-    );
+    let params = CreateIntentParams {
+        intent_id: intent_id.clone(),
+        source_token: token.clone(),
+        source_amount: amount,
+        destination_chain_id: 8453u64,
+        destination_token: token_bytes,
+        receiver: receiver_bytes,
+        receiver_is_account: false,
+        destination_amount: 990_000_000i128,
+        deadline: 2000u64,
+        refund_address: sender.clone(),
+        relayer: zero_relayer,
+    };
+    client.create_intent(&sender, &params);
 
     // Admin refund (before deadline) - uses stored owner
-    client.admin_refund(&intent_id);
+    client.admin_refund(&owner, &intent_id);
 
     // Verify refund
     let intent = client.get_intent(&intent_id);
@@ -328,7 +332,7 @@ fn test_admin_refund() {
 
 #[test]
 fn test_admin_set_intent_status() {
-    let (env, contract, _owner, sender, receiver, _relayer, token, _token_client) = setup_env();
+    let (env, contract, owner, sender, receiver, _relayer, token, _token_client) = setup_env();
 
     let client = RozoIntentsContractClient::new(&env, &contract);
     let intent_id = generate_intent_id(&env);
@@ -342,22 +346,23 @@ fn test_admin_set_intent_status() {
     });
 
     // Create intent
-    client.create_intent(
-        &sender,
-        &intent_id,
-        &token,
-        &1_000_000_000i128,
-        &8453u64,
-        &token_bytes,
-        &receiver_bytes,
-        &990_000_000i128,
-        &2000u64,
-        &sender,
-        &zero_relayer,
-    );
+    let params = CreateIntentParams {
+        intent_id: intent_id.clone(),
+        source_token: token.clone(),
+        source_amount: 1_000_000_000i128,
+        destination_chain_id: 8453u64,
+        destination_token: token_bytes,
+        receiver: receiver_bytes,
+        receiver_is_account: false,
+        destination_amount: 990_000_000i128,
+        deadline: 2000u64,
+        refund_address: sender.clone(),
+        relayer: zero_relayer,
+    };
+    client.create_intent(&sender, &params);
 
     // Admin can change status
-    client.admin_set_intent_status(&intent_id, &IntentStatus::Failed);
+    client.set_intent_status(&owner, &intent_id, &IntentStatus::Failed);
 
     let intent = client.get_intent(&intent_id);
     assert_eq!(intent.status, IntentStatus::Failed);
@@ -365,7 +370,7 @@ fn test_admin_set_intent_status() {
 
 #[test]
 fn test_admin_set_intent_relayer() {
-    let (env, contract, _owner, sender, receiver, _relayer, token, _token_client) = setup_env();
+    let (env, contract, owner, sender, receiver, _relayer, token, _token_client) = setup_env();
 
     let client = RozoIntentsContractClient::new(&env, &contract);
     let intent_id = generate_intent_id(&env);
@@ -380,22 +385,23 @@ fn test_admin_set_intent_relayer() {
     });
 
     // Create intent with no relayer
-    client.create_intent(
-        &sender,
-        &intent_id,
-        &token,
-        &1_000_000_000i128,
-        &8453u64,
-        &token_bytes,
-        &receiver_bytes,
-        &990_000_000i128,
-        &2000u64,
-        &sender,
-        &zero_relayer,
-    );
+    let params = CreateIntentParams {
+        intent_id: intent_id.clone(),
+        source_token: token.clone(),
+        source_amount: 1_000_000_000i128,
+        destination_chain_id: 8453u64,
+        destination_token: token_bytes,
+        receiver: receiver_bytes,
+        receiver_is_account: false,
+        destination_amount: 990_000_000i128,
+        deadline: 2000u64,
+        refund_address: sender.clone(),
+        relayer: zero_relayer,
+    };
+    client.create_intent(&sender, &params);
 
     // Admin can assign relayer
-    client.admin_set_intent_relayer(&intent_id, &new_relayer);
+    client.set_intent_relayer(&owner, &intent_id, &new_relayer);
 
     let intent = client.get_intent(&intent_id);
     assert_eq!(intent.relayer, new_relayer);

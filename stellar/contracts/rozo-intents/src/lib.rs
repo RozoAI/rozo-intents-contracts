@@ -8,6 +8,7 @@ mod types;
 use errors::Error;
 use events::*;
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, IntoVal, String};
+use soroban_sdk::xdr::{FromXdr, ToXdr};
 use storage::*;
 use types::*;
 
@@ -43,66 +44,59 @@ impl RozoIntentsContract {
     // ============ User Functions ============
 
     /// Create a new intent
+    /// @param params Bundled intent parameters (to stay within 10-param limit)
     pub fn create_intent(
         env: Env,
         sender: Address,
-        intent_id: BytesN<32>,
-        source_token: Address,
-        source_amount: i128,
-        destination_chain_id: u64,
-        destination_token: BytesN<32>,
-        receiver: BytesN<32>,
-        destination_amount: i128,
-        deadline: u64,
-        refund_address: Address,
-        relayer: BytesN<32>,
+        params: CreateIntentParams,
     ) -> Result<(), Error> {
         sender.require_auth();
 
         // Validate
-        if source_amount <= 0 || destination_amount <= 0 {
+        if params.source_amount <= 0 || params.destination_amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        if deadline <= env.ledger().timestamp() {
+        if params.deadline <= env.ledger().timestamp() {
             return Err(Error::InvalidDeadline);
         }
-        if has_intent(&env, &intent_id) {
+        if has_intent(&env, &params.intent_id) {
             return Err(Error::IntentAlreadyExists);
         }
 
         // Transfer tokens from sender to contract
-        let token_client = token::Client::new(&env, &source_token);
-        token_client.transfer(&sender, &env.current_contract_address(), &source_amount);
+        let token_client = token::Client::new(&env, &params.source_token);
+        token_client.transfer(&sender, &env.current_contract_address(), &params.source_amount);
 
         // Store intent
         let intent = Intent {
-            intent_id: intent_id.clone(),
+            intent_id: params.intent_id.clone(),
             sender: sender.clone(),
-            refund_address: refund_address.clone(),
-            source_token: source_token.clone(),
-            source_amount,
-            destination_chain_id,
-            destination_token: destination_token.clone(),
-            receiver: receiver.clone(),
-            destination_amount,
-            deadline,
+            refund_address: params.refund_address.clone(),
+            source_token: params.source_token.clone(),
+            source_amount: params.source_amount,
+            destination_chain_id: params.destination_chain_id,
+            destination_token: params.destination_token.clone(),
+            receiver: params.receiver.clone(),
+            receiver_is_account: params.receiver_is_account,
+            destination_amount: params.destination_amount,
+            deadline: params.deadline,
             created_at: env.ledger().timestamp(),
             status: IntentStatus::Pending,
-            relayer: relayer.clone(),
+            relayer: params.relayer.clone(),
         };
-        set_intent(&env, &intent_id, &intent);
+        set_intent(&env, &params.intent_id, &intent);
 
         emit_intent_created(
             &env,
-            intent_id,
+            params.intent_id,
             sender,
-            source_token,
-            source_amount,
-            destination_chain_id,
-            receiver,
-            destination_amount,
-            deadline,
-            relayer,
+            params.source_token,
+            params.source_amount,
+            params.destination_chain_id,
+            params.receiver,
+            params.destination_amount,
+            params.deadline,
+            params.relayer,
         );
 
         Ok(())
@@ -149,12 +143,14 @@ impl RozoIntentsContract {
     // ============ Destination Functions ============
 
     /// Fill intent on destination and send notification to source chain
+    /// @param repayment_is_account Whether the repayment_address is a Stellar account (G...) or contract (C...)
     pub fn fill_and_notify(
         env: Env,
         relayer: Address,
         intent_data: IntentData,
         repayment_address: BytesN<32>,
-        messenger_id: u8,
+        repayment_is_account: bool,
+        messenger_id: u32,
     ) -> Result<(), Error> {
         relayer.require_auth();
 
@@ -198,16 +194,19 @@ impl RozoIntentsContract {
             return Err(Error::AlreadyFilled);
         }
 
-        // Store fill record
+        // Store fill record with repayment address type
         let record = FillRecord {
             relayer: relayer.clone(),
             repayment_address: repayment_address.clone(),
+            repayment_is_account,
         };
         set_fill_record(&env, &fill_hash, &record);
 
         // Transfer tokens to receiver
-        let receiver_address = bytes32_to_address(&env, &intent_data.receiver);
-        let token_address = bytes32_to_address(&env, &intent_data.destination_token);
+        // Use receiver_is_account flag from IntentData to correctly decode the address type
+        let receiver_address = bytes32_to_address_typed(&env, &intent_data.receiver, intent_data.receiver_is_account);
+        // Token addresses are always contracts
+        let token_address = bytes32_to_address_typed(&env, &intent_data.destination_token, false);
 
         let token_client = token::Client::new(&env, &token_address);
         token_client.transfer(&relayer, &receiver_address, &intent_data.destination_amount);
@@ -220,7 +219,7 @@ impl RozoIntentsContract {
         let adapter_address = adapter.unwrap();
 
         // Build payload for cross-chain notification
-        // Format: intentId, fillHash, repaymentAddress, relayer (who performed fill), amount
+        // Format: intentId, fillHash, repaymentAddress, relayer (who performed fill), amount, flags
         let relayer_bytes32 = address_to_bytes32(&env, &relayer);
         let payload = encode_notify_payload(
             &env,
@@ -229,6 +228,7 @@ impl RozoIntentsContract {
             &repayment_address,
             &relayer_bytes32,
             intent_data.destination_amount,
+            repayment_is_account,
         );
 
         // Get source chain info for cross-chain messaging
@@ -252,7 +252,7 @@ impl RozoIntentsContract {
         env: Env,
         relayer: Address,
         intent_data: IntentData,
-        messenger_id: u8,
+        messenger_id: u32,
     ) -> Result<(), Error> {
         relayer.require_auth();
 
@@ -278,7 +278,7 @@ impl RozoIntentsContract {
         }
         let adapter_address = adapter.unwrap();
 
-        // Build payload with relayer identity
+        // Build payload with relayer identity and address type flags
         let relayer_bytes32 = address_to_bytes32(&env, &relayer);
         let payload = encode_notify_payload(
             &env,
@@ -287,6 +287,7 @@ impl RozoIntentsContract {
             &record.repayment_address,
             &relayer_bytes32,
             intent_data.destination_amount,
+            record.repayment_is_account,
         );
 
         let source_chain = get_chain_name(&env, intent_data.source_chain_id)?;
@@ -312,8 +313,8 @@ impl RozoIntentsContract {
     pub fn notify(
         env: Env,
         caller: Address,
-        messenger_id: u8,
-        source_chain_id: u64,
+        messenger_id: u32,
+        _source_chain_id: u64,
         message_data: Bytes,
     ) -> Result<(), Error> {
         // Verify messenger adapter is registered
@@ -335,11 +336,11 @@ impl RozoIntentsContract {
         caller.require_auth();
 
         // Decode payload (adapter has already verified the message before calling)
-        let (fill_hash, intent_id, repayment_address, relayer, amount_paid) =
+        let (fill_hash, intent_id, repayment_address, relayer, amount_paid, repayment_is_account) =
             decode_notify_payload(&env, &message_data)?;
 
-        // Complete fill
-        complete_fill(&env, &intent_id, &fill_hash, &repayment_address, relayer, amount_paid)
+        // Complete fill with correct address type
+        complete_fill(&env, &intent_id, &fill_hash, &repayment_address, repayment_is_account, relayer, amount_paid)
     }
 
     // ============ Admin Functions ============
@@ -392,7 +393,7 @@ impl RozoIntentsContract {
     }
 
     /// Set messenger adapter
-    pub fn set_msger_adapter(env: Env, admin: Address, messenger_id: u8, adapter: Address) -> Result<(), Error> {
+    pub fn set_msger_adapter(env: Env, admin: Address, messenger_id: u32, adapter: Address) -> Result<(), Error> {
         admin.require_auth();
         require_owner(&env)?;
         set_messenger_adapter(&env, messenger_id, &adapter);
@@ -568,7 +569,7 @@ impl RozoIntentsContract {
     }
 
     /// Get messenger adapter
-    pub fn get_msger_adapter(env: Env, messenger_id: u8) -> Option<Address> {
+    pub fn get_msger_adapter(env: Env, messenger_id: u32) -> Option<Address> {
         get_messenger_adapter(&env, messenger_id)
     }
 
@@ -602,6 +603,7 @@ fn complete_fill(
     intent_id: &BytesN<32>,
     fill_hash: &BytesN<32>,
     repayment_address: &BytesN<32>,
+    repayment_is_account: bool,
     relayer: BytesN<32>,
     amount_paid: i128,
 ) -> Result<(), Error> {
@@ -613,6 +615,7 @@ fn complete_fill(
     }
 
     // Compute expected fillHash from stored intent
+    // Include receiver_is_account from stored intent for hash verification
     let expected_data = IntentData {
         intent_id: intent.intent_id.clone(),
         sender: address_to_bytes32(env, &intent.sender),
@@ -627,6 +630,7 @@ fn complete_fill(
         deadline: intent.deadline,
         created_at: intent.created_at,
         relayer: intent.relayer.clone(),
+        receiver_is_account: intent.receiver_is_account,
     };
     let expected_fill_hash = compute_fill_hash(env, &expected_data);
 
@@ -659,8 +663,8 @@ fn complete_fill(
     intent.status = IntentStatus::Filled;
     set_intent(env, intent_id, &intent);
 
-    // Pay relayer using repaymentAddress
-    let payout_address = bytes32_to_address(env, repayment_address);
+    // Pay relayer using repaymentAddress with correct address type
+    let payout_address = bytes32_to_address_typed(env, repayment_address, repayment_is_account);
     let token_client = token::Client::new(env, &intent.source_token);
     token_client.transfer(&env.current_contract_address(), &payout_address, &relayer_payout);
 
@@ -688,25 +692,39 @@ fn is_rozo_fallback(env: &Env, caller: &Address, created_at: u64) -> bool {
 }
 
 fn compute_fill_hash(env: &Env, intent_data: &IntentData) -> BytesN<32> {
-    // Simple hash computation - in production use proper hashing
-    use soroban_sdk::crypto::Hash;
-    let mut hasher = env.crypto().sha256_hash_new();
+    // Build bytes to hash
+    let mut data = Bytes::new(env);
 
-    hasher.hash_extend(&intent_data.intent_id.to_array());
-    hasher.hash_extend(&intent_data.sender.to_array());
-    hasher.hash_extend(&intent_data.refund_address.to_array());
-    hasher.hash_extend(&intent_data.source_token.to_array());
-    hasher.hash_extend(&intent_data.source_amount.to_be_bytes());
-    hasher.hash_extend(&intent_data.source_chain_id.to_be_bytes());
-    hasher.hash_extend(&intent_data.destination_chain_id.to_be_bytes());
-    hasher.hash_extend(&intent_data.destination_token.to_array());
-    hasher.hash_extend(&intent_data.receiver.to_array());
-    hasher.hash_extend(&intent_data.destination_amount.to_be_bytes());
-    hasher.hash_extend(&intent_data.deadline.to_be_bytes());
-    hasher.hash_extend(&intent_data.created_at.to_be_bytes());
-    hasher.hash_extend(&intent_data.relayer.to_array());
+    // Intent ID (32 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.intent_id.to_array()));
+    // Sender (32 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.sender.to_array()));
+    // Refund Address (32 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.refund_address.to_array()));
+    // Source Token (32 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.source_token.to_array()));
+    // Source Amount (16 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.source_amount.to_be_bytes()));
+    // Source Chain ID (8 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.source_chain_id.to_be_bytes()));
+    // Destination Chain ID (8 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.destination_chain_id.to_be_bytes()));
+    // Destination Token (32 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.destination_token.to_array()));
+    // Receiver (32 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.receiver.to_array()));
+    // Destination Amount (16 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.destination_amount.to_be_bytes()));
+    // Deadline (8 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.deadline.to_be_bytes()));
+    // Created At (8 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.created_at.to_be_bytes()));
+    // Relayer (32 bytes)
+    data.append(&Bytes::from_array(env, &intent_data.relayer.to_array()));
+    // Include receiver_is_account in hash for cross-chain consistency (1 byte)
+    data.append(&Bytes::from_array(env, &[if intent_data.receiver_is_account { 1u8 } else { 0u8 }]));
 
-    hasher.hash_finalize()
+    env.crypto().sha256(&data).into()
 }
 
 /// Convert Stellar Address to bytes32 for cross-chain compatibility
@@ -809,23 +827,11 @@ fn bytes32_to_address_typed(env: &Env, bytes: &BytesN<32>, is_account: bool) -> 
     }
 }
 
-/// Convert bytes32 to Stellar Address (defaults to Contract address)
-///
-/// For cross-chain compatibility, bytes32 values are assumed to be CONTRACT addresses
-/// by default, since:
-/// 1. Token contracts are always Contract addresses
-/// 2. Cross-chain receivers should use Contract addresses for better compatibility
-///
-/// If you need to convert to an Account address, use `bytes32_to_address_typed` instead.
-fn bytes32_to_address(env: &Env, bytes: &BytesN<32>) -> Address {
-    // Default to contract address for cross-chain compatibility
-    // Users who need to receive at an account address should provide the type explicitly
-    bytes32_to_address_typed(env, bytes, false)
-}
 
 /// Encode notify payload for cross-chain notification
-/// Format: intentId (32) + fillHash (32) + repaymentAddress (32) + relayer (32) + amount (32)
-/// Total: 160 bytes
+/// Format: intentId (32) + fillHash (32) + repaymentAddress (32) + relayer (32) + amount (32) + flags (32)
+/// Flags byte 31: repayment_is_account (1 = account, 0 = contract)
+/// Total: 192 bytes
 fn encode_notify_payload(
     env: &Env,
     intent_id: &BytesN<32>,
@@ -833,6 +839,7 @@ fn encode_notify_payload(
     repayment_address: &BytesN<32>,
     relayer: &BytesN<32>,
     amount: i128,
+    repayment_is_account: bool,
 ) -> Bytes {
     let mut payload = Bytes::new(env);
 
@@ -854,17 +861,24 @@ fn encode_notify_payload(
     amount_bytes[16..32].copy_from_slice(&amount_be);
     payload.append(&Bytes::from_array(env, &amount_bytes));
 
+    // Flags (32 bytes) - address type flags
+    // Byte 31: repayment_is_account (1 = account, 0 = contract)
+    let mut flags_bytes = [0u8; 32];
+    flags_bytes[31] = if repayment_is_account { 1 } else { 0 };
+    payload.append(&Bytes::from_array(env, &flags_bytes));
+
     payload
 }
 
 /// Decode notify payload from cross-chain notification
-/// Format: intentId (32) + fillHash (32) + repaymentAddress (32) + relayer (32) + amount (32)
-/// Returns: (fillHash, intentId, repaymentAddress, relayer, amount)
+/// Format: intentId (32) + fillHash (32) + repaymentAddress (32) + relayer (32) + amount (32) + flags (32)
+/// Flags byte 31: repayment_is_account (1 = account, 0 = contract)
+/// Returns: (fillHash, intentId, repaymentAddress, relayer, amount, repayment_is_account)
 fn decode_notify_payload(
     env: &Env,
     payload: &Bytes,
-) -> Result<(BytesN<32>, BytesN<32>, BytesN<32>, BytesN<32>, i128), Error> {
-    if payload.len() != 160 {
+) -> Result<(BytesN<32>, BytesN<32>, BytesN<32>, BytesN<32>, i128, bool), Error> {
+    if payload.len() != 192 {
         return Err(Error::InvalidPayload);
     }
 
@@ -873,6 +887,7 @@ fn decode_notify_payload(
     let mut repayment_arr = [0u8; 32];
     let mut relayer_arr = [0u8; 32];
     let mut amount_arr = [0u8; 32];
+    let mut flags_arr = [0u8; 32];
 
     for i in 0..32 {
         intent_id_arr[i] = payload.get(i as u32).unwrap_or(0);
@@ -880,6 +895,7 @@ fn decode_notify_payload(
         repayment_arr[i] = payload.get((64 + i) as u32).unwrap_or(0);
         relayer_arr[i] = payload.get((96 + i) as u32).unwrap_or(0);
         amount_arr[i] = payload.get((128 + i) as u32).unwrap_or(0);
+        flags_arr[i] = payload.get((160 + i) as u32).unwrap_or(0);
     }
 
     let intent_id = BytesN::from_array(env, &intent_id_arr);
@@ -892,7 +908,10 @@ fn decode_notify_payload(
     amount_i128_arr.copy_from_slice(&amount_arr[16..32]);
     let amount = i128::from_be_bytes(amount_i128_arr);
 
-    Ok((fill_hash, intent_id, repayment_address, relayer, amount))
+    // Flags: byte 31 is repayment_is_account
+    let repayment_is_account = flags_arr[31] != 0;
+
+    Ok((fill_hash, intent_id, repayment_address, relayer, amount, repayment_is_account))
 }
 
 #[cfg(test)]

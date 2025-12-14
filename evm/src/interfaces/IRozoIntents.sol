@@ -31,6 +31,7 @@ struct Intent {
     uint256 destinationChainId; // Target chain ID
     bytes32 destinationToken;   // Token on destination (bytes32 for cross-chain compatibility)
     bytes32 receiver;           // Recipient on destination (bytes32 for cross-chain)
+    bool receiverIsAccount;     // Is receiver a Stellar account (G...) or contract (C...)?
     uint256 destinationAmount;  // Minimum amount receiver expects
     uint64 deadline;            // Unix timestamp (seconds) - after this, refund allowed
     uint64 createdAt;           // Unix timestamp when intent was created (for Rozo fallback timing)
@@ -54,6 +55,7 @@ struct IntentData {
     uint64 deadline;
     uint64 createdAt;
     bytes32 relayer;
+    bool receiverIsAccount;     // Is receiver a Stellar account (G...) or contract (C...)?
 }
 
 /// @title Fill Record Struct
@@ -61,6 +63,7 @@ struct IntentData {
 struct FillRecord {
     address relayer;            // Who filled on destination chain
     bytes32 repaymentAddress;   // Relayer's address on source chain for payout
+    bool repaymentIsAccount;    // Is repayment address a Stellar account (G...) or contract (C...)?
 }
 
 /// @title RozoIntents Errors
@@ -159,6 +162,7 @@ interface IRozoIntentsUser {
     /// @param destinationChainId Target chain ID
     /// @param destinationToken Token address on destination (bytes32)
     /// @param receiver Recipient address on destination (bytes32)
+    /// @param receiverIsAccount Whether receiver is a Stellar account (G...) or contract (C...)
     /// @param destinationAmount Minimum amount receiver expects
     /// @param deadline Unix timestamp after which refund is allowed
     /// @param refundAddress Where to refund if expired
@@ -170,6 +174,7 @@ interface IRozoIntentsUser {
         uint256 destinationChainId,
         bytes32 destinationToken,
         bytes32 receiver,
+        bool receiverIsAccount,
         uint256 destinationAmount,
         uint64 deadline,
         address refundAddress,
@@ -186,10 +191,12 @@ interface IRozoIntentsDestination {
     /// @notice Fill intent and send notification to source chain
     /// @param intentData Full intent data for cross-chain verification
     /// @param repaymentAddress Relayer's address on source chain for payout (bytes32)
+    /// @param repaymentIsAccount Whether repayment address is a Stellar account (G...) or contract (C...)
     /// @param messengerId Messenger to use (0=Rozo, 1=Axelar)
     function fillAndNotify(
         IntentData calldata intentData,
         bytes32 repaymentAddress,
+        bool repaymentIsAccount,
         uint8 messengerId
     ) external payable;
 
@@ -236,7 +243,7 @@ interface IRozoIntentsView {
     function intents(bytes32 intentId) external view returns (Intent memory);
     function relayers(address relayer) external view returns (RelayerType);
     function messengerAdapters(uint8 messengerId) external view returns (IMessengerAdapter);
-    function filledIntents(bytes32 fillHash) external view returns (address relayer, bytes32 repaymentAddress);
+    function filledIntents(bytes32 fillHash) external view returns (address relayer, bytes32 repaymentAddress, bool repaymentIsAccount);
     function rozoRelayer() external view returns (address);
     function rozoRelayerThreshold() external view returns (uint256);
     function protocolFee() external view returns (uint256);

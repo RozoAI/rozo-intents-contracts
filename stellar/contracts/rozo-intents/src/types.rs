@@ -1,5 +1,23 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, String};
 
+/// Input parameters for create_intent function
+/// Bundled to avoid hitting the 10-parameter limit
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct CreateIntentParams {
+    pub intent_id: BytesN<32>,
+    pub source_token: Address,
+    pub source_amount: i128,
+    pub destination_chain_id: u64,
+    pub destination_token: BytesN<32>,
+    pub receiver: BytesN<32>,
+    pub receiver_is_account: bool,
+    pub destination_amount: i128,
+    pub deadline: u64,
+    pub refund_address: Address,
+    pub relayer: BytesN<32>,
+}
+
 /// Intent Status
 /// PENDING -> FILLED (success) or FAILED (mismatch) or REFUNDED (after deadline)
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +51,7 @@ pub struct Intent {
     pub destination_chain_id: u64,
     pub destination_token: BytesN<32>,
     pub receiver: BytesN<32>,
+    pub receiver_is_account: bool,     // Is receiver a Stellar account (G...) or contract (C...)?
     pub destination_amount: i128,
     pub deadline: u64,
     pub created_at: u64,               // Timestamp when intent was created (for Rozo fallback)
@@ -58,6 +77,9 @@ pub struct IntentData {
     pub deadline: u64,
     pub created_at: u64,
     pub relayer: BytesN<32>,
+    // Address type flags for Stellar addresses (true = Account/G..., false = Contract/C...)
+    // These are needed because bytes32 cannot encode the address type
+    pub receiver_is_account: bool,      // Is receiver a Stellar account (G...) or contract (C...)?
 }
 
 /// Fill Record Structure
@@ -67,6 +89,7 @@ pub struct IntentData {
 pub struct FillRecord {
     pub relayer: Address,              // Who filled on destination chain
     pub repayment_address: BytesN<32>, // Relayer's address on source chain for payout
+    pub repayment_is_account: bool,    // Is repayment address an account (G...) or contract (C...)?
 }
 
 /// Outbound message (for testing/debugging)

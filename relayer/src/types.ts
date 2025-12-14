@@ -30,6 +30,7 @@ export interface Intent {
   destinationChainId: number;
   destinationToken: string; // bytes32
   receiver: string; // bytes32
+  receiverIsAccount: boolean; // Is receiver a Stellar account (G...) or contract (C...)?
   destinationAmount: bigint;
   deadline: number;
   createdAt: number;
@@ -55,6 +56,7 @@ export interface IntentData {
   deadline: number;
   createdAt: number;
   relayer: string; // bytes32
+  receiverIsAccount: boolean; // Is receiver a Stellar account (G...) or contract (C...)?
 }
 
 /**
@@ -63,6 +65,7 @@ export interface IntentData {
 export interface FillRecord {
   relayer: string; // address
   repaymentAddress: string; // bytes32
+  repaymentIsAccount: boolean; // Is repayment address a Stellar account or contract?
 }
 
 /**

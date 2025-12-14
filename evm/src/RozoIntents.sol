@@ -83,6 +83,7 @@ contract RozoIntents is
     // ============ User Functions ============
 
     /// @inheritdoc IRozoIntentsUser
+    /// @param receiverIsAccount Whether receiver is a Stellar account (G...) or contract (C...)
     function createIntent(
         bytes32 intentId,
         address sourceToken,
@@ -90,6 +91,7 @@ contract RozoIntents is
         uint256 destinationChainId,
         bytes32 destinationToken,
         bytes32 receiver,
+        bool receiverIsAccount,
         uint256 destinationAmount,
         uint64 deadline,
         address refundAddress,
@@ -116,6 +118,7 @@ contract RozoIntents is
             destinationChainId: destinationChainId,
             destinationToken: destinationToken,
             receiver: receiver,
+            receiverIsAccount: receiverIsAccount,
             destinationAmount: destinationAmount,
             deadline: deadline,
             createdAt: uint64(block.timestamp),
@@ -157,6 +160,7 @@ contract RozoIntents is
     function fillAndNotify(
         IntentData calldata intentData,
         bytes32 repaymentAddress,
+        bool repaymentIsAccount,
         uint8 messengerId
     ) external payable override nonReentrant {
         // Verify caller is authorized relayer
@@ -188,10 +192,11 @@ contract RozoIntents is
         FillRecord storage existing = filledIntents[fillHash];
         if (existing.relayer != address(0)) revert AlreadyFilled();
 
-        // Store fill record
+        // Store fill record with address type
         filledIntents[fillHash] = FillRecord({
             relayer: msg.sender,
-            repaymentAddress: repaymentAddress
+            repaymentAddress: repaymentAddress,
+            repaymentIsAccount: repaymentIsAccount
         });
 
         // Transfer tokens to receiver
@@ -202,23 +207,46 @@ contract RozoIntents is
         IERC20(tokenAddress).safeTransferFrom(msg.sender, receiverAddress, intentData.destinationAmount);
 
         // Send cross-chain notification
-        IMessengerAdapter adapter = messengerAdapters[messengerId];
-        if (address(adapter) == address(0)) revert InvalidMessenger();
-
-        // Build payload with relayer identity for attribution
-        // Format: intentId, fillHash, repaymentAddress, relayer, amount
-        bytes32 relayerBytes32 = _addressToBytes32(msg.sender);
-        bytes memory payload = abi.encode(
+        _sendNotification(
             intentData.intentId,
             fillHash,
             repaymentAddress,
-            relayerBytes32,
-            intentData.destinationAmount
+            repaymentIsAccount,
+            intentData.destinationAmount,
+            intentData.sourceChainId,
+            messengerId
         );
 
-        adapter.sendMessage{value: msg.value}(intentData.sourceChainId, payload);
-
         emit FillAndNotifySent(intentData.intentId, msg.sender, repaymentAddress, messengerId);
+    }
+
+    /// @notice Internal helper to send cross-chain notification
+    function _sendNotification(
+        bytes32 intentId,
+        bytes32 fillHash,
+        bytes32 repaymentAddress,
+        bool repaymentIsAccount,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint8 messengerId
+    ) internal {
+        IMessengerAdapter adapter = messengerAdapters[messengerId];
+        if (address(adapter) == address(0)) revert InvalidMessenger();
+
+        // Build payload with relayer identity and address type flags
+        // Format: intentId, fillHash, repaymentAddress, relayer, amount, flags
+        bytes32 relayerBytes32 = _addressToBytes32(msg.sender);
+        bytes32 flags = repaymentIsAccount ? bytes32(uint256(1)) : bytes32(0);
+        bytes memory payload = abi.encode(
+            intentId,
+            fillHash,
+            repaymentAddress,
+            relayerBytes32,
+            amount,
+            flags
+        );
+
+        adapter.sendMessage{value: msg.value}(sourceChainId, payload);
     }
 
     /// @inheritdoc IRozoIntentsDestination
@@ -236,22 +264,16 @@ contract RozoIntents is
         // Only original filler can retry
         if (record.relayer != msg.sender) revert NotAssignedRelayer();
 
-        // Get messenger adapter
-        IMessengerAdapter adapter = messengerAdapters[messengerId];
-        if (address(adapter) == address(0)) revert InvalidMessenger();
-
-        // Build payload with relayer identity for attribution
-        // Format: intentId, fillHash, repaymentAddress, relayer, amount
-        bytes32 relayerBytes32 = _addressToBytes32(msg.sender);
-        bytes memory payload = abi.encode(
+        // Send cross-chain notification using stored repayment info
+        _sendNotification(
             intentData.intentId,
             fillHash,
             record.repaymentAddress,
-            relayerBytes32,
-            intentData.destinationAmount
+            record.repaymentIsAccount,
+            intentData.destinationAmount,
+            intentData.sourceChainId,
+            messengerId
         );
-
-        adapter.sendMessage{value: msg.value}(intentData.sourceChainId, payload);
 
         emit RetryNotifySent(intentData.intentId, msg.sender, messengerId);
     }
@@ -272,12 +294,15 @@ contract RozoIntents is
         // Verify and decode message
         bytes memory payload = adapter.verifyMessage(sourceChainId, messageData);
 
-        // Decode payload with relayer identity
-        // Format: intentId, fillHash, repaymentAddress, relayer, amount
-        (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress, bytes32 relayer, uint256 amountPaid) =
-            abi.decode(payload, (bytes32, bytes32, bytes32, bytes32, uint256));
+        // Decode payload with relayer identity and address type flags
+        // Format: intentId, fillHash, repaymentAddress, relayer, amount, flags
+        (bytes32 intentId, bytes32 fillHash, bytes32 repaymentAddress, bytes32 relayer, uint256 amountPaid, bytes32 flags) =
+            abi.decode(payload, (bytes32, bytes32, bytes32, bytes32, uint256, bytes32));
 
-        _completeFill(intentId, fillHash, repaymentAddress, relayer, amountPaid);
+        // Extract repaymentIsAccount from flags (byte 31 = 1 means account)
+        bool repaymentIsAccount = uint256(flags) != 0;
+
+        _completeFill(intentId, fillHash, repaymentAddress, repaymentIsAccount, relayer, amountPaid);
     }
 
     // ============ Admin Functions ============
@@ -395,19 +420,25 @@ contract RozoIntents is
     // ============ Internal Functions ============
 
     /// @notice Complete a fill on source chain after receiving cross-chain notification
+    /// @param repaymentIsAccount Whether repayment address is a Stellar account (for cross-chain consistency)
     function _completeFill(
         bytes32 intentId,
         bytes32 fillHash,
         bytes32 repaymentAddress,
+        bool repaymentIsAccount,
         bytes32 relayer,
         uint256 amountPaid
     ) internal {
+        // Suppress unused variable warning - repaymentIsAccount is needed for Stellar but not EVM
+        (repaymentIsAccount);
+
         Intent storage intent = _requireIntent(intentId);
         if (intent.status != IntentStatus.PENDING) {
             revert InvalidStatus(intent.status, IntentStatus.PENDING);
         }
 
         // Compute expected fillHash from stored intent
+        // Include receiverIsAccount for cross-chain consistency
         IntentData memory expectedData = IntentData({
             intentId: intent.intentId,
             sender: _addressToBytes32(intent.sender),
@@ -421,7 +452,8 @@ contract RozoIntents is
             destinationAmount: intent.destinationAmount,
             deadline: intent.deadline,
             createdAt: intent.createdAt,
-            relayer: intent.relayer
+            relayer: intent.relayer,
+            receiverIsAccount: intent.receiverIsAccount
         });
         bytes32 expectedFillHash = keccak256(abi.encode(expectedData));
 

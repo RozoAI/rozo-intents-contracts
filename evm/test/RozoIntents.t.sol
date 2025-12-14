@@ -92,6 +92,7 @@ contract RozoIntentsTest is Test {
             DEST_CHAIN_ID,
             DEST_TOKEN,
             RECEIVER_BYTES,
+            false, // receiverIsAccount
             DESTINATION_AMOUNT,
             uint64(block.timestamp + 1 hours),
             REFUND,
@@ -107,16 +108,17 @@ contract RozoIntentsTest is Test {
 
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
         vm.stopPrank();
 
         assertEq(token.balanceOf(RECEIVER), DESTINATION_AMOUNT);
 
         // Check fill record was stored
         bytes32 fillHash = keccak256(abi.encode(intentData));
-        (address filledRelayer, bytes32 filledRepaymentAddress) = intents.filledIntents(fillHash);
+        (address filledRelayer, bytes32 filledRepaymentAddress, bool repaymentIsAccount) = intents.filledIntents(fillHash);
         assertEq(filledRelayer, RELAYER);
         assertEq(filledRepaymentAddress, _addressToBytes32(RELAYER));
+        assertEq(repaymentIsAccount, false);
     }
 
     function testFillAndNotifyWithDifferentRepaymentAddress() public {
@@ -125,11 +127,11 @@ contract RozoIntentsTest is Test {
 
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
-        intents.fillAndNotify(intentData, repaymentAddress, 0);
+        intents.fillAndNotify(intentData, repaymentAddress, false, 0);
         vm.stopPrank();
 
         bytes32 fillHash = keccak256(abi.encode(intentData));
-        (, bytes32 filledRepaymentAddress) = intents.filledIntents(fillHash);
+        (, bytes32 filledRepaymentAddress,) = intents.filledIntents(fillHash);
         assertEq(filledRepaymentAddress, repaymentAddress);
     }
 
@@ -141,7 +143,7 @@ contract RozoIntentsTest is Test {
         vm.startPrank(stranger);
         token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.NotRelayer.selector);
-        intents.fillAndNotify(intentData, _addressToBytes32(stranger), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(stranger), false, 0);
         vm.stopPrank();
     }
 
@@ -152,7 +154,7 @@ contract RozoIntentsTest is Test {
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.IntentExpired.selector);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
         vm.stopPrank();
     }
 
@@ -163,7 +165,7 @@ contract RozoIntentsTest is Test {
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.WrongChain.selector);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
         vm.stopPrank();
     }
 
@@ -172,10 +174,10 @@ contract RozoIntentsTest is Test {
 
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT * 2);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
 
         vm.expectRevert(IRozoIntentsErrors.AlreadyFilled.selector);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
         vm.stopPrank();
     }
 
@@ -186,7 +188,7 @@ contract RozoIntentsTest is Test {
         vm.startPrank(RELAYER); // But RELAYER tries to fill
         token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.NotAssignedRelayer.selector);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
         vm.stopPrank();
     }
 
@@ -201,7 +203,7 @@ contract RozoIntentsTest is Test {
         // ROZO_RELAYER can fill after threshold (10 seconds)
         vm.startPrank(ROZO_RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
-        intents.fillAndNotify(intentData, _addressToBytes32(ROZO_RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(ROZO_RELAYER), false, 0);
         vm.stopPrank();
 
         assertEq(token.balanceOf(RECEIVER), DESTINATION_AMOUNT);
@@ -219,7 +221,7 @@ contract RozoIntentsTest is Test {
         vm.startPrank(ROZO_RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.NotAssignedRelayer.selector);
-        intents.fillAndNotify(intentData, _addressToBytes32(ROZO_RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(ROZO_RELAYER), false, 0);
         vm.stopPrank();
     }
 
@@ -229,7 +231,7 @@ contract RozoIntentsTest is Test {
         // Test with Axelar (messengerId = 1)
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 1);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 1);
         vm.stopPrank();
 
         // Check that Axelar adapter received the message
@@ -243,7 +245,7 @@ contract RozoIntentsTest is Test {
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
         vm.expectRevert(IRozoIntentsErrors.InvalidMessenger.selector);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 99); // Invalid messengerId
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 99); // Invalid messengerId
         vm.stopPrank();
     }
 
@@ -255,7 +257,7 @@ contract RozoIntentsTest is Test {
         // First fill with Rozo adapter
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
 
         // Retry with Axelar adapter
         intents.retryNotify(intentData, 1);
@@ -279,7 +281,7 @@ contract RozoIntentsTest is Test {
 
         vm.startPrank(RELAYER);
         token.approve(address(intents), DESTINATION_AMOUNT);
-        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), 0);
+        intents.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
         vm.stopPrank();
 
         // Different relayer tries to retry
@@ -308,15 +310,17 @@ contract RozoIntentsTest is Test {
             destinationAmount: stored.destinationAmount,
             deadline: stored.deadline,
             createdAt: stored.createdAt,
-            relayer: stored.relayer
+            relayer: stored.relayer,
+            receiverIsAccount: stored.receiverIsAccount
         });
 
         bytes32 fillHash = keccak256(abi.encode(intentData));
         bytes32 repaymentAddress = _addressToBytes32(RELAYER);
         bytes32 relayerBytes32 = _addressToBytes32(RELAYER);
+        bytes32 flags = bytes32(0); // repaymentIsAccount = false
 
-        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount
-        bytes memory payload = abi.encode(intentId, fillHash, repaymentAddress, relayerBytes32, DESTINATION_AMOUNT);
+        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount, flags
+        bytes memory payload = abi.encode(intentId, fillHash, repaymentAddress, relayerBytes32, DESTINATION_AMOUNT, flags);
 
         uint256 relayerBefore = token.balanceOf(RELAYER);
 
@@ -336,9 +340,10 @@ contract RozoIntentsTest is Test {
         bytes32 wrongFillHash = keccak256("wrong");
         bytes32 repaymentAddress = _addressToBytes32(RELAYER);
         bytes32 relayerBytes32 = _addressToBytes32(RELAYER);
+        bytes32 flags = bytes32(0); // repaymentIsAccount = false
 
-        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount
-        bytes memory payload = abi.encode(intentId, wrongFillHash, repaymentAddress, relayerBytes32, DESTINATION_AMOUNT);
+        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount, flags
+        bytes memory payload = abi.encode(intentId, wrongFillHash, repaymentAddress, relayerBytes32, DESTINATION_AMOUNT, flags);
 
         rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
 
@@ -347,7 +352,8 @@ contract RozoIntentsTest is Test {
     }
 
     function testNotifyRevertsIfNotMessenger() public {
-        bytes memory payload = abi.encode(bytes32(0), bytes32(0), bytes32(0), bytes32(0), uint256(0));
+        bytes32 flags = bytes32(0);
+        bytes memory payload = abi.encode(bytes32(0), bytes32(0), bytes32(0), bytes32(0), uint256(0), flags);
 
         vm.prank(address(0x1234));
         vm.expectRevert(IRozoIntentsErrors.NotMessenger.selector);
@@ -425,13 +431,15 @@ contract RozoIntentsTest is Test {
             destinationAmount: stored.destinationAmount,
             deadline: stored.deadline,
             createdAt: stored.createdAt,
-            relayer: stored.relayer
+            relayer: stored.relayer,
+            receiverIsAccount: stored.receiverIsAccount
         });
 
         bytes32 fillHash = keccak256(abi.encode(intentData));
         bytes32 relayerBytes32 = _addressToBytes32(RELAYER);
-        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount
-        bytes memory payload = abi.encode(intentId, fillHash, relayerBytes32, relayerBytes32, DESTINATION_AMOUNT);
+        bytes32 flags = bytes32(0); // repaymentIsAccount = false
+        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount, flags
+        bytes memory payload = abi.encode(intentId, fillHash, relayerBytes32, relayerBytes32, DESTINATION_AMOUNT, flags);
         rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
 
         uint256 recipientBefore = token.balanceOf(FEE_RECIPIENT);
@@ -502,6 +510,7 @@ contract RozoIntentsTest is Test {
             DEST_CHAIN_ID,
             DEST_TOKEN,
             RECEIVER_BYTES,
+            false, // receiverIsAccount
             DESTINATION_AMOUNT,
             uint64(block.timestamp + 1 hours),
             REFUND,
@@ -524,7 +533,8 @@ contract RozoIntentsTest is Test {
             destinationAmount: DESTINATION_AMOUNT,
             deadline: uint64(block.timestamp + 1 hours),
             createdAt: uint64(block.timestamp),
-            relayer: bytes32(0) // Open intent
+            relayer: bytes32(0), // Open intent
+            receiverIsAccount: false
         });
     }
 
