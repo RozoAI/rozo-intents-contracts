@@ -8,9 +8,9 @@ ROZO Intents is a stablecoin abstraction that lets users express what they want 
 
 ## Deployed Contract
 
-| Network | Contract Address |
-|---------|-----------------|
-| Stellar Mainnet | `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL` |
+| Network | Contract Address | Verification |
+|---------|-----------------|--------------|
+| Stellar Mainnet | `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL` | [StellarExpert](https://stellar.expert/explorer/public/contract/CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL) |
 
 ## Overview
 
@@ -132,41 +132,17 @@ cd v1/stellar/payment
 cargo test
 ```
 
-## Contract Verification
+## Build & Verification
 
-This contract uses [stellar-expert/soroban-build-workflow](https://github.com/stellar-expert/soroban-build-workflow) for reproducible builds and verification.
+This contract uses [stellar-expert/soroban-build-workflow](https://github.com/stellar-expert/soroban-build-workflow) for reproducible builds.
 
-### Verify on StellarExpert
-
-1. Go to [StellarExpert Contract Validation](https://stellar.expert/explorer/public/contract/validation)
-2. Enter contract address: `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL`
-3. The validator will compare the deployed WASM with our GitHub release artifacts
-
-### Build Reproducibility
-
-Our GitHub Actions workflow (`.github/workflows/release.yml`) automatically:
-- Compiles contracts into optimized WebAssembly
-- Creates GitHub releases with artifacts
-- Generates SHA256 hashes for verification
-- Produces build attestations
-
-To trigger a release:
-- Push a git tag: `git tag v1.0.0 && git push origin v1.0.0`
-- Or manually trigger via GitHub Actions UI
-
-## Future Roadmap
-
-V1 is a stepping stone. When Circle CCTP launches on Stellar, we will:
-
-1. Activate the full cross-chain architecture in `evm/`, `stellar/`, `relayer/`
-2. Enable direct Base <-> Stellar transfers without intermediaries
-3. Keep V1 running as an alternative simple path
-
-See [../DESIGN_README.md](../DESIGN_README.md) for the full cross-chain design.
+To trigger a new release:
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
 
 ## Links
 
 - **Website**: [https://www.rozo.ai/](https://www.rozo.ai/)
 - **Transaction Status**: [https://intents.rozo.ai/status](https://intents.rozo.ai/status)
-- **Main Repository**: [../README.md](../README.md)
-- **Contract Verification**: [StellarExpert](https://stellar.expert/explorer/public/contract/validation)
+- **Full Cross-Chain Design**: [DESIGN_README.md](../DESIGN_README.md)

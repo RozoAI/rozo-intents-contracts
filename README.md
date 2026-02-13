@@ -36,35 +36,11 @@ V1 leverages multiple cross-chain liquidity sources to provide the best user exp
 
 ### V1 Contract
 
-| Network | Contract Address |
-|---------|-----------------|
-| Stellar Mainnet | `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL` |
+| Network | Contract Address | Verification |
+|---------|-----------------|--------------|
+| Stellar Mainnet | `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL` | [StellarExpert](https://stellar.expert/explorer/public/contract/CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL) |
 
 See [v1/](./v1/) for the Stellar payment contract implementation.
-
-## Future: Full Cross-Chain Design
-
-The complete bidirectional Base ↔ Stellar architecture is documented for when CCTP launches:
-
-- [DESIGN_README.md](./DESIGN_README.md) - Full system overview
-- [docs/design/](./docs/design/) - Detailed design specifications
-
-### Planned Architecture
-
-```
-Source Chain                     Destination Chain
-     |                                  |
-Sender --> createIntent() --> PENDING   |
-     |                           |      |
-     |                           |   Relayer --> fillAndNotify()
-     |                           |      |        (pays receiver instantly)
-     |                           |      |
-     |<-------- Messenger -------+------+
-     |
-FILLED (relayer repaid)
-```
-
-**Multiple messenger options**: ROZO messenger (default, ~1-3 sec) or Axelar (~5-10 sec).
 
 ## Repository Structure
 
@@ -76,27 +52,13 @@ rozo-intents-contracts/
 ├── stellar/               # Future: Full Stellar intents (when CCTP launches)
 ├── relayer/               # Future: Relayer service (when CCTP launches)
 └── docs/                  # Design documentation
-    ├── design/           # Architecture specs
-    └── development/      # Implementation guides
 ```
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [DESIGN_README.md](./DESIGN_README.md) | Full cross-chain system overview |
-| [docs/design/DESIGN.md](./docs/design/DESIGN.md) | Architecture, functions, status flow |
-| [docs/design/GLOSSARY.md](./docs/design/GLOSSARY.md) | Terms, chains, tokens, roles |
-| [docs/design/FUND_FLOW.md](./docs/design/FUND_FLOW.md) | Fund movement, fees, refunds |
-
-## Contract Verification
-
-Our contracts use [stellar-expert/soroban-build-workflow](https://github.com/stellar-expert/soroban-build-workflow) for reproducible builds.
-
-Verify on [StellarExpert](https://stellar.expert/explorer/public/contract/validation) using our contract address.
+For the full cross-chain design (when CCTP launches), see [DESIGN_README.md](./DESIGN_README.md).
 
 ## Links
 
 - **Website**: [https://www.rozo.ai/](https://www.rozo.ai/)
 - **Transaction Status**: [https://intents.rozo.ai/status](https://intents.rozo.ai/status)
-- **Contract Verification**: [StellarExpert](https://stellar.expert/explorer/public/contract/validation)

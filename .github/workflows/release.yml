@@ -22,7 +22,7 @@ jobs:
     with:
       release_name: ${{ github.event.inputs.release_name || github.ref_name }}
       release_description: 'ROZO Intents V1 Payment Contract - Stellar payment wrapper for cross-chain stablecoin intents'
-      relative_path: '["v1/stellar/payment"]'
+      relative_path: 'v1/stellar/payment'
       package: 'payment'
       home_domain: 'rozo.ai'
     secrets:
