@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env, String, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol};
 
 // Storage keys
 const DEST: Symbol = symbol_short!("dest");
@@ -21,8 +21,12 @@ pub enum Error {
     InsufficientBalance = 4,
 }
 
-// Contract events
-#[contractevent]
+// Event topics
+const PAYMENT: Symbol = symbol_short!("payment");
+const FLUSH: Symbol = symbol_short!("flush");
+
+// Contract event data types
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentEvent {
     pub from: Address,
@@ -31,7 +35,7 @@ pub struct PaymentEvent {
     pub memo: String,
 }
 
-#[contractevent]
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlushEvent {
     pub token: Address,
@@ -92,12 +96,15 @@ impl Payment {
         token_client.transfer(&from, &destination, &amount);
 
         // Emit payment event
-        PaymentEvent {
-            from,
-            destination,
-            amount,
-            memo,
-        }.publish(&env);
+        env.events().publish(
+            (PAYMENT, from.clone()),
+            PaymentEvent {
+                from,
+                destination,
+                amount,
+                memo,
+            },
+        );
 
         Ok(())
     }
@@ -123,11 +130,14 @@ impl Payment {
         token_client.transfer(&env.current_contract_address(), &destination, &amount);
 
         // Emit flush event
-        FlushEvent {
-            token: token_contract,
-            destination,
-            amount,
-        }.publish(&env);
+        env.events().publish(
+            (FLUSH, destination.clone()),
+            FlushEvent {
+                token: token_contract,
+                destination,
+                amount,
+            },
+        );
 
         Ok(())
     }
