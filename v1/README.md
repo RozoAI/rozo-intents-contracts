@@ -1,6 +1,10 @@
-# V1: Stellar Payment Wrapper
+# ROZO Intents V1: Stellar Payment Wrapper
+
+**Website:** [https://www.rozo.ai/](https://www.rozo.ai/)
 
 A simple Soroban smart contract that wraps cross-chain payments on Stellar, providing on-chain transparency while leveraging existing intent infrastructure.
+
+ROZO Intents is a stablecoin abstraction that lets users express what they want to do—pay or earn—without worrying about how it's executed onchain.
 
 ## Deployed Contract
 
@@ -19,7 +23,7 @@ V1 is designed as a simple wrapper that:
 ### How It Works
 
 ```
-User                    Payment Contract              Rozo Backend
+User                    Payment Contract              ROZO Backend
   |                           |                            |
   |-- pay(amount, memo) ----->|                            |
   |                           |-- PaymentEvent ----------->|
@@ -35,11 +39,13 @@ User                    Payment Contract              Rozo Backend
 
 ### Key Features
 
+- **Non-Custodial**: Contract never holds user funds—USDC flows directly to destination, no asset breach risk
 - **Privacy**: Transaction details encoded in memo, not exposed on-chain
-- **Speed**: Instant fulfillment when liquidity is available
+- **Speed**: Users receive funds within seconds
 - **Multi-provider**: Routes to optimal liquidity source (Near Intent for Stellar, Across for EVM, more coming)
 - **Cost optimization**: Aggregates multiple sources for best rates
 - **Simplicity**: Minimal contract surface area
+- **Transparent**: Track any transaction status at [intents.rozo.ai/status](https://intents.rozo.ai/status)
 
 ## Contract Functions
 
@@ -99,7 +105,7 @@ base:0x1234...abcd:
 
 ### For Users (via Frontend)
 
-Users interact through the Rozo frontend which:
+Users interact through the ROZO frontend ([rozo.ai](https://www.rozo.ai/)) which:
 1. Calculates fees and exchange rates
 2. Encodes the memo with destination details
 3. Submits the payment transaction
@@ -126,6 +132,28 @@ cd v1/stellar/payment
 cargo test
 ```
 
+## Contract Verification
+
+This contract uses [stellar-expert/soroban-build-workflow](https://github.com/stellar-expert/soroban-build-workflow) for reproducible builds and verification.
+
+### Verify on StellarExpert
+
+1. Go to [StellarExpert Contract Validation](https://stellar.expert/explorer/public/contract/validation)
+2. Enter contract address: `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL`
+3. The validator will compare the deployed WASM with our GitHub release artifacts
+
+### Build Reproducibility
+
+Our GitHub Actions workflow (`.github/workflows/release.yml`) automatically:
+- Compiles contracts into optimized WebAssembly
+- Creates GitHub releases with artifacts
+- Generates SHA256 hashes for verification
+- Produces build attestations
+
+To trigger a release:
+- Push a git tag: `git tag v1.0.0 && git push origin v1.0.0`
+- Or manually trigger via GitHub Actions UI
+
 ## Future Roadmap
 
 V1 is a stepping stone. When Circle CCTP launches on Stellar, we will:
@@ -135,3 +163,10 @@ V1 is a stepping stone. When Circle CCTP launches on Stellar, we will:
 3. Keep V1 running as an alternative simple path
 
 See [../DESIGN_README.md](../DESIGN_README.md) for the full cross-chain design.
+
+## Links
+
+- **Website**: [https://www.rozo.ai/](https://www.rozo.ai/)
+- **Transaction Status**: [https://intents.rozo.ai/status](https://intents.rozo.ai/status)
+- **Main Repository**: [../README.md](../README.md)
+- **Contract Verification**: [StellarExpert](https://stellar.expert/explorer/public/contract/validation)
