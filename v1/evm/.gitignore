@@ -1,0 +1,16 @@
+# Compiler output
+out/
+cache/
+
+# Node modules
+node_modules/
+
+# Environment files
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# OS files
+.DS_Store

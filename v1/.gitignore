@@ -1,0 +1,15 @@
+# Node modules
+node_modules/
+
+# Environment files
+.env
+.env.example
+
+# OS files
+.DS_Store
+
+# Test scripts (not part of contracts)
+/script/
+/internal/
+package.json
+package-lock.json
