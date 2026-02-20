@@ -13,7 +13,7 @@ ROZO Intents is a stablecoin abstraction that lets users express what they want 
 | Network | Contract Address | Verification |
 |---------|-----------------|--------------|
 | Mainnet | `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL` | [StellarExpert](https://stellar.expert/explorer/public/contract/CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL) |
-| Testnet | `CAAAPVRAQWPZXRHQS2F44HWL7K3ZFDJJOPKG6WM4RAZ2VYDT63LQVROF` | [StellarExpert](https://stellar.expert/explorer/testnet/contract/CAAAPVRAQWPZXRHQS2F44HWL7K3ZFDJJOPKG6WM4RAZ2VYDT63LQVROF) |
+| Testnet | `CAMFFQ6XHLOTUJER45PIZCMMIO73UXHTKCPWECKTL3L6IBSH6XSCMYRE` | [StellarExpert](https://stellar.expert/explorer/testnet/contract/CAMFFQ6XHLOTUJER45PIZCMMIO73UXHTKCPWECKTL3L6IBSH6XSCMYRE) |
 
 ### EVM (Base)
 
@@ -21,6 +21,8 @@ ROZO Intents is a stablecoin abstraction that lets users express what they want 
 |---------|----------|---------|--------------|
 | Base Mainnet | MPForwarderV2 | *Coming soon* | - |
 | Base Sepolia | MPForwarderV2 | *Coming soon* | - |
+
+**ABI:** The ABI build file is included at [`evm/MPForwarderV2.json`](evm/MPForwarderV2.json).
 
 ## Overview
 
@@ -60,6 +62,8 @@ User                    Payment Contract              ROZO Backend
 ---
 
 ## Stellar Contract
+
+The Stellar testnet contract supports order tracking and pooled payout logic with on-chain event emission.
 
 ### Contract Functions
 
@@ -122,6 +126,8 @@ cargo test
 ## EVM Contract (MPForwarderV2)
 
 The EVM contract is a payment forwarder that receives funds and routes them to the destination address.
+
+**ABI File:** [`evm/MPForwarderV2.json`](evm/MPForwarderV2.json)
 
 ### Contract Functions
 
@@ -203,7 +209,7 @@ The memo field encodes the cross-chain routing information:
 
 Example:
 ```
-base:0x1234...abcd:
+base:0x742d35Cc6634C0532925a3b844Bc454e4438f44e:
 ```
 
 ## Integration
@@ -220,7 +226,7 @@ Users interact through the ROZO frontend ([rozo.ai](https://www.rozo.ai/)) which
 **Stellar:**
 ```rust
 // Example: Pay 100 USDC to Base address
-let memo = String::from_str(&env, "base:0x1234...abcd:");
+let memo = String::from_str(&env, "base:0x742d35Cc6634C0532925a3b844Bc454e4438f44e:");
 payment_client.pay(&user_address, &100_0000000, &memo);
 ```
 
