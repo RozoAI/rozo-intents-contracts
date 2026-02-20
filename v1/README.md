@@ -1,16 +1,26 @@
-# ROZO Intents V1: Stellar Payment Wrapper
+# ROZO Intents V1: Cross-Chain Payment Contracts
 
 **Website:** [https://www.rozo.ai/](https://www.rozo.ai/)
 
-A simple Soroban smart contract that wraps cross-chain payments on Stellar, providing on-chain transparency while leveraging existing intent infrastructure.
+Smart contracts for cross-chain payments on Stellar and EVM chains, providing on-chain transparency while leveraging existing intent infrastructure.
 
 ROZO Intents is a stablecoin abstraction that lets users express what they want to do—pay or earn—without worrying about how it's executed onchain.
 
-## Deployed Contract
+## Deployed Contracts
+
+### Stellar
 
 | Network | Contract Address | Verification |
 |---------|-----------------|--------------|
-| Stellar Mainnet | `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL` | [StellarExpert](https://stellar.expert/explorer/public/contract/CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL) |
+| Mainnet | `CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL` | [StellarExpert](https://stellar.expert/explorer/public/contract/CAC5SKP5FJT2ZZ7YLV4UCOM6Z5SQCCVPZWHLLLVQNQG2RWWOOSP3IYRL) |
+| Testnet | `CAAAPVRAQWPZXRHQS2F44HWL7K3ZFDJJOPKG6WM4RAZ2VYDT63LQVROF` | [StellarExpert](https://stellar.expert/explorer/testnet/contract/CAAAPVRAQWPZXRHQS2F44HWL7K3ZFDJJOPKG6WM4RAZ2VYDT63LQVROF) |
+
+### EVM (Base)
+
+| Network | Contract | Address | Verification |
+|---------|----------|---------|--------------|
+| Base Mainnet | MPForwarderV2 | *Coming soon* | - |
+| Base Sepolia | MPForwarderV2 | *Coming soon* | - |
 
 ## Overview
 
@@ -47,9 +57,13 @@ User                    Payment Contract              ROZO Backend
 - **Simplicity**: Minimal contract surface area
 - **Transparent**: Track any transaction status at [intents.rozo.ai/status](https://intents.rozo.ai/status)
 
-## Contract Functions
+---
 
-### `init(destination: Address)`
+## Stellar Contract
+
+### Contract Functions
+
+#### `init(destination: Address)`
 
 Initialize the contract with a destination address (our liquidity pool).
 
@@ -57,7 +71,7 @@ Initialize the contract with a destination address (our liquidity pool).
 - Sets the destination for all payments
 - Configures USDC token address
 
-### `pay(from: Address, amount: i128, memo: String)`
+#### `pay(from: Address, amount: i128, memo: String)`
 
 Submit a payment for cross-chain transfer.
 
@@ -76,17 +90,108 @@ PaymentEvent {
 }
 ```
 
-### `flush(token_contract: Address, amount: i128)`
+#### `flush(token_contract: Address, amount: i128)`
 
 Recover tokens accidentally sent to the contract.
 
-### `get_destination() -> Address`
+#### `get_destination() -> Address`
 
 Returns the configured destination address.
 
-### `get_usdc() -> Address`
+#### `get_usdc() -> Address`
 
 Returns the USDC token contract address.
+
+### Building
+
+```bash
+cd v1/stellar/payment
+cargo build --target wasm32-unknown-unknown --release
+stellar contract optimize --wasm target/wasm32-unknown-unknown/release/payment.wasm
+```
+
+### Testing
+
+```bash
+cd v1/stellar/payment
+cargo test
+```
+
+---
+
+## EVM Contract (MPForwarderV2)
+
+The EVM contract is a payment forwarder that receives funds and routes them to the destination address.
+
+### Contract Functions
+
+#### `init(destination: address, relayer: address)`
+
+Initialize the contract with destination and relayer addresses.
+
+- Can only be called once
+- Sets the destination for all flushes
+- Sets the relayer for controlled transfers
+
+#### `initAndFlush(destination, relayer, initType, tokenAddress, to, amount)`
+
+Initialize and immediately perform a transfer/flush operation.
+
+**InitType enum:**
+- `NONE`: No action
+- `TRANSFER_ETH`: Transfer ETH amount to `to`, flush remainder
+- `TRANSFER_ERC20`: Transfer ERC20 amount to `to`, flush remainder
+- `TRANSFER_USDT`: Transfer USDT amount to `to`, flush remainder
+- `FLUSH_ETH`: Flush all ETH to destination
+- `FLUSH_ERC20`: Flush all ERC20 to destination
+- `FLUSH_USDT`: Flush all USDT to destination
+
+#### `transferETH(to: address, amount: uint256)` (relayer only)
+
+Transfer ETH to recipient, flush remainder to destination.
+
+#### `transferERC20(tokenContractAddress, to, amount)` (relayer only)
+
+Transfer ERC20 tokens to recipient, flush remainder to destination.
+
+#### `transferUSDT(tokenContractAddress, to, amount)` (relayer only)
+
+Transfer USDT to recipient (uses non-standard transfer), flush remainder.
+
+#### `flushETH()` (public)
+
+Flush all ETH balance to destination.
+
+#### `flushERC20(tokenContractAddress)` (public)
+
+Flush all ERC20 balance to destination.
+
+#### `flushUSDT(tokenContractAddress)` (public)
+
+Flush all USDT balance to destination.
+
+### Building
+
+```bash
+cd v1/evm
+forge build
+```
+
+### Testing
+
+```bash
+cd v1/evm
+forge test
+```
+
+### Deploying
+
+```bash
+cd v1/evm
+forge script script/CreateAccounts.s.sol --rpc-url <RPC_URL> --broadcast
+```
+
+---
 
 ## Memo Format
 
@@ -112,24 +217,18 @@ Users interact through the ROZO frontend ([rozo.ai](https://www.rozo.ai/)) which
 
 ### For Developers
 
+**Stellar:**
 ```rust
 // Example: Pay 100 USDC to Base address
 let memo = String::from_str(&env, "base:0x1234...abcd:");
 payment_client.pay(&user_address, &100_0000000, &memo);
 ```
 
-## Building
-
-```bash
-cd v1/stellar/payment
-cargo build --target wasm32-unknown-unknown --release
-```
-
-## Testing
-
-```bash
-cd v1/stellar/payment
-cargo test
+**EVM:**
+```solidity
+// Funds are sent to the forwarder address
+// Relayer calls transferERC20 to route to user
+forwarder.transferERC20(usdcAddress, userAddress, amount);
 ```
 
 ## Build & Verification
