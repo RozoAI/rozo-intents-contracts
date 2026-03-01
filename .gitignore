@@ -4,3 +4,9 @@ reference/
 docs/.DS_Store
 
 CLAUDE.md
+
+v1
+evm/out
+
+# Stellar build artifacts
+v2/stellar/target/

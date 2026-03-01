@@ -1,0 +1,17 @@
+[package]
+name = "token-forwarder"
+version = "2.0.0"
+edition = "2021"
+license = "BSD-2-Clause"
+description = "Token Forwarder contract for Rozo Intents V2"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+# Note: [profile.*] sections moved to workspace root v2/stellar/Cargo.toml
