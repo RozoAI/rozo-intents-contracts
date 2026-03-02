@@ -28,6 +28,10 @@ fn setup_env() -> (Env, Address, Address, TokenForwarderClient<'static>) {
     (env, admin, proxy_address, client)
 }
 
+// =============================================================================
+// Constructor Tests
+// =============================================================================
+
 #[test]
 fn test_constructor_sets_config() {
     let (_env, admin, proxy_address, client) = setup_env();
@@ -35,6 +39,10 @@ fn test_constructor_sets_config() {
     assert_eq!(client.get_admin(), Some(admin));
     assert_eq!(client.get_proxy_address(), Some(proxy_address));
 }
+
+// =============================================================================
+// Forward Tests (C Wallets → G Wallets)
+// =============================================================================
 
 #[test]
 fn test_forward_success() {
@@ -96,6 +104,145 @@ fn test_forward_memo_too_long() {
     assert_eq!(result, Err(Ok(Error::MemoTooLong)));
 }
 
+// =============================================================================
+// Memo Mapping Tests (G Wallets → C Wallets)
+// =============================================================================
+
+#[test]
+fn test_set_memo_mapping_success() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "user123");
+    let destination = Address::generate(&env);
+
+    client.set_memo_mapping(&memo, &destination);
+
+    assert_eq!(client.get_memo_destination(&memo), Some(destination));
+}
+
+#[test]
+fn test_set_memo_mapping_empty_memo() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "");
+    let destination = Address::generate(&env);
+
+    let result = client.try_set_memo_mapping(&memo, &destination);
+    assert_eq!(result, Err(Ok(Error::EmptyMemo)));
+}
+
+#[test]
+fn test_set_memo_mapping_memo_too_long() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "this memo is way too long and exceeds 28 bytes");
+    let destination = Address::generate(&env);
+
+    let result = client.try_set_memo_mapping(&memo, &destination);
+    assert_eq!(result, Err(Ok(Error::MemoTooLong)));
+}
+
+#[test]
+fn test_set_memo_mapping_overwrite() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "user123");
+    let destination1 = Address::generate(&env);
+    let destination2 = Address::generate(&env);
+
+    // Set initial mapping
+    client.set_memo_mapping(&memo, &destination1);
+    assert_eq!(client.get_memo_destination(&memo), Some(destination1));
+
+    // Overwrite with new destination
+    client.set_memo_mapping(&memo, &destination2);
+    assert_eq!(client.get_memo_destination(&memo), Some(destination2));
+}
+
+#[test]
+fn test_remove_memo_mapping_success() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "user123");
+    let destination = Address::generate(&env);
+
+    // Set mapping
+    client.set_memo_mapping(&memo, &destination);
+    assert_eq!(client.get_memo_destination(&memo), Some(destination));
+
+    // Remove mapping
+    client.remove_memo_mapping(&memo);
+    assert_eq!(client.get_memo_destination(&memo), None);
+}
+
+#[test]
+fn test_get_memo_destination_not_found() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "nonexistent");
+
+    assert_eq!(client.get_memo_destination(&memo), None);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Auth")]
+fn test_set_memo_mapping_unauthorized() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let wrong_caller = Address::generate(&env);
+    let memo = String::from_str(&env, "user123");
+    let destination = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &wrong_caller,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_memo_mapping",
+            args: vec![
+                &env,
+                memo.into_val(&env),
+                destination.into_val(&env),
+            ],
+            sub_invokes: &[],
+        },
+    }]);
+
+    // This should fail - wrong_caller is not admin
+    client.set_memo_mapping(&memo, &destination);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Auth")]
+fn test_remove_memo_mapping_unauthorized() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "user123");
+    let destination = Address::generate(&env);
+
+    // First set a mapping (with mock_all_auths)
+    client.set_memo_mapping(&memo, &destination);
+
+    // Now try to remove with wrong caller
+    let wrong_caller = Address::generate(&env);
+    let memo2 = String::from_str(&env, "user123");
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &wrong_caller,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "remove_memo_mapping",
+            args: vec![&env, memo2.into_val(&env)],
+            sub_invokes: &[],
+        },
+    }]);
+
+    // This should fail - wrong_caller is not admin
+    client.remove_memo_mapping(&memo);
+}
+
+// =============================================================================
+// Admin Function Tests
+// =============================================================================
+
 #[test]
 fn test_set_proxy_address() {
     let (env, _admin, _proxy_address, client) = setup_env();
@@ -136,10 +283,6 @@ fn test_flush_zero_amount() {
 // =============================================================================
 // Authorization Tests (using mock_auths to test specific auth requirements)
 // =============================================================================
-
-/// These tests verify that authorization is properly enforced by using mock_auths
-/// to provide authorization for specific addresses, and verifying the call fails
-/// when the wrong address provides authorization.
 
 #[test]
 #[should_panic(expected = "HostError: Error(Auth")]
@@ -250,4 +393,31 @@ fn test_forward_unauthorized_sender() {
 
     // This should fail - sender hasn't authorized (wrong_caller did)
     client.forward(&sender, &token.address, &500, &to, &memo);
+}
+
+#[test]
+fn test_set_memo_mapping_authorized() {
+    let (env, admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "user123");
+    let destination = Address::generate(&env);
+
+    // Mock auth for the correct admin
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_memo_mapping",
+            args: vec![
+                &env,
+                memo.clone().into_val(&env),
+                destination.clone().into_val(&env),
+            ],
+            sub_invokes: &[],
+        },
+    }]);
+
+    // This should succeed - admin is authorized
+    client.set_memo_mapping(&memo, &destination);
+    assert_eq!(client.get_memo_destination(&memo), Some(destination));
 }

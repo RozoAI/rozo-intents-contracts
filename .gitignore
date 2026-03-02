@@ -10,3 +10,22 @@ evm/out
 
 # Stellar build artifacts
 v2/stellar/target/
+
+# Local env/secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+
+# Key/cert files
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local accidental files
+0.72.0

@@ -160,4 +160,4 @@ cargo test
 
 ## Contact
 
-For questions regarding this audit scope, please contact the Rozo team.
+For questions regarding this audit scope, please contact hi@rozo.ai

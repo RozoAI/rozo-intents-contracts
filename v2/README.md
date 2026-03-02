@@ -6,16 +6,23 @@ We are building V2 contracts to bring liquidity from other chains to Stellar. Cu
 
 ### Current Problems
 
+Stellar Smart Wallets (C Accounts) cannot transfer or receive USDC with memo. For example, users from Binance / Coinbase cannot withdraw or deposit via Smart Wallets. 
+https://developers.stellar.org/docs/build/guides/contract-accounts/smart-wallets
+
 1. **Address + Memo Limitation**: Some services cannot send to a Stellar address with a memo. For example, if a user wants to send to their Binance deposit address (which requires a memo), this is not supported.
 
 2. **No Contract Invoke Support**: Many cross-chain services do not support contract invocation on Stellar. Users can only send to regular accounts, not interact with smart contracts.
 
 ### Our Solution
 
-V2 introduces a **proxy contract** that:
+V2 introduces a **forwarder (proxy) contract** that:
 
 - **Enables address + memo routing**: Users can specify any destination address with memo through events
 - **Supports contract invocation**: The proxy pattern allows invoking any Stellar contract through our forwarder
+
+
+V2 introduces an **intent based bridge contract** that:
+
 - **Service agnostic**: Works as a universal adapter for any liquidity provider (Near Intents, Circle CCTP, and future services)
 
 ```
@@ -34,13 +41,23 @@ External Liquidity Provider
     Send to destination (address + memo supported)
 ```
 
+## Supported Tokens
+
+The contracts support any Stellar token (SEP-41 compatible), including:
+
+| Token | Mainnet Address | Decimals |
+|-------|-----------------|----------|
+| XLM (Native) | `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` | 7 |
+| USDC (Circle) | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | 7 |
+| EURC (Circle) | `CDTKPWPLOURQA2SGTKTUQOWRCBFJ2LFVGWAGDOCKIQTYUEDTPLAPMFKQ` | 7 |
+
 ## Overview
 
 This repository contains two Soroban smart contracts:
 
 | Contract | Purpose | Code Size |
 |----------|---------|-----------|
-| **Token Forwarder** | Minimal token forwarding with event-based destination tracking | ~100 lines |
+| **Token Forwarder** | Minimal token forwarding with event-based destination tracking | ~150 lines |
 | **Intent Bridge** | Escrow-based cross-chain intent system with timeout protection | ~200 lines |
 
 ## Architecture
@@ -205,6 +222,7 @@ soroban contract deploy \
 
 - [Token Forwarder Design](docs/DESIGN_FORWARDER.md) - Detailed specification
 - [Intent Bridge Design](docs/DESIGN_INTENT_BRIDGE.md) - Detailed specification
+- [FAQ](docs/FAQ.md) - Frequently asked questions
 
 ## License
 

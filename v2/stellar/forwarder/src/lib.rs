@@ -11,6 +11,7 @@ use soroban_sdk::{
 pub enum DataKey {
     Admin,
     ProxyAddress,
+    MemoMapping(String), // Maps memo to destination address
 }
 
 /// Error codes
@@ -22,6 +23,8 @@ pub enum Error {
     ZeroAmount = 2,
     EmptyDestination = 3,
     MemoTooLong = 4,
+    MemoNotFound = 5,
+    EmptyMemo = 6,
 }
 
 /// Forward event data
@@ -37,6 +40,31 @@ pub struct ForwardEvent {
     pub timestamp: u64,
 }
 
+/// Memo mapping set event
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoMappingSetEvent {
+    pub memo: String,
+    pub destination: Address,
+    pub timestamp: u64,
+}
+
+/// Memo mapping removed event
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoMappingRemovedEvent {
+    pub memo: String,
+    pub timestamp: u64,
+}
+
+/// Proxy address changed event
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyAddressSetEvent {
+    pub new_proxy_address: Address,
+    pub timestamp: u64,
+}
+
 #[contract]
 pub struct TokenForwarder;
 
@@ -49,7 +77,7 @@ impl TokenForwarder {
         env.storage().instance().set(&DataKey::ProxyAddress, &proxy_address);
     }
 
-    /// Forward tokens to proxy_address
+    /// Forward tokens to proxy_address (C Wallets → G Wallets)
     pub fn forward(
         env: Env,
         sender: Address,
@@ -99,6 +127,61 @@ impl TokenForwarder {
         Ok(())
     }
 
+    /// Admin: Set memo mapping (for G Wallets → C Wallets)
+    pub fn set_memo_mapping(env: Env, memo: String, destination: Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if memo.len() == 0 {
+            return Err(Error::EmptyMemo);
+        }
+        if memo.len() > 28 {
+            return Err(Error::MemoTooLong);
+        }
+
+        env.storage().persistent().set(&DataKey::MemoMapping(memo.clone()), &destination);
+
+        // Emit event
+        let event = MemoMappingSetEvent {
+            memo,
+            destination,
+            timestamp: env.ledger().timestamp(),
+        };
+        env.events().publish((symbol_short!("memo_set"),), event);
+
+        Ok(())
+    }
+
+    /// Admin: Remove memo mapping
+    pub fn remove_memo_mapping(env: Env, memo: String) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        env.storage().persistent().remove(&DataKey::MemoMapping(memo.clone()));
+
+        // Emit event
+        let event = MemoMappingRemovedEvent {
+            memo,
+            timestamp: env.ledger().timestamp(),
+        };
+        env.events().publish((symbol_short!("memo_rm"),), event);
+
+        Ok(())
+    }
+
+    /// Query: get memo destination
+    pub fn get_memo_destination(env: Env, memo: String) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::MemoMapping(memo))
+    }
+
     /// Admin: update proxy address
     pub fn set_proxy_address(env: Env, new_proxy_address: Address) -> Result<(), Error> {
         let admin: Address = env
@@ -109,6 +192,13 @@ impl TokenForwarder {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::ProxyAddress, &new_proxy_address);
+
+        // Emit event
+        let event = ProxyAddressSetEvent {
+            new_proxy_address,
+            timestamp: env.ledger().timestamp(),
+        };
+        env.events().publish((symbol_short!("proxy_set"),), event);
 
         Ok(())
     }
