@@ -68,6 +68,8 @@ pub struct ProxyAddressSetEvent {
 /// TTL constants (7 days in ledgers, ~5 sec per ledger)
 const INSTANCE_TTL_THRESHOLD: u32 = 120960; // 7 days
 const INSTANCE_TTL_EXTEND: u32 = 241920;    // 14 days
+const MEMO_TTL_THRESHOLD: u32 = 120960; // 7 days
+const MEMO_TTL_EXTEND: u32 = 241920;    // 14 days
 
 #[contract]
 pub struct TokenForwarder;
@@ -154,7 +156,9 @@ impl TokenForwarder {
             return Err(Error::MemoTooLong);
         }
 
-        env.storage().persistent().set(&DataKey::MemoMapping(memo.clone()), &destination);
+        let key = DataKey::MemoMapping(memo.clone());
+        env.storage().persistent().set(&key, &destination);
+        env.storage().persistent().extend_ttl(&key, MEMO_TTL_THRESHOLD, MEMO_TTL_EXTEND);
 
         // Emit event
         let event = MemoMappingSetEvent {
@@ -192,8 +196,14 @@ impl TokenForwarder {
     }
 
     /// Query: get memo destination
+    /// Extends TTL on read to keep active mappings alive
     pub fn get_memo_destination(env: Env, memo: String) -> Option<Address> {
-        env.storage().persistent().get(&DataKey::MemoMapping(memo))
+        let key = DataKey::MemoMapping(memo);
+        let result: Option<Address> = env.storage().persistent().get(&key);
+        if result.is_some() {
+            env.storage().persistent().extend_ttl(&key, MEMO_TTL_THRESHOLD, MEMO_TTL_EXTEND);
+        }
+        result
     }
 
     /// Admin: update proxy address
