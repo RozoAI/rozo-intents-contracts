@@ -185,21 +185,34 @@ impl IntentBridge {
             deadline,
         };
 
-        // Lock funds to contract
+        // Lock funds to contract — measure actual received amount (balance delta)
+        // to handle fee-on-transfer or deflationary tokens correctly
         let token_client = token::Client::new(&env, &source_token);
+        let balance_before = token_client.balance(&env.current_contract_address());
         token_client.transfer(&sender, &env.current_contract_address(), &source_amount);
+        let balance_after = token_client.balance(&env.current_contract_address());
+        let actual_received = balance_after - balance_before;
+        if actual_received <= 0 {
+            return Err(Error::ZeroAmount);
+        }
+
+        // Store intent with actual escrowed amount
+        let intent = Intent {
+            source_amount: actual_received,
+            ..intent
+        };
 
         // Store intent with TTL extension
         let key = DataKey::Intent(intent_id.clone());
         env.storage().persistent().set(&key, &intent);
         env.storage().persistent().extend_ttl(&key, INTENT_TTL_THRESHOLD, INTENT_TTL_EXTEND);
 
-        // Emit event
+        // Emit event with actual escrowed amount
         let event = IntentCreatedEvent {
             intent_id: intent_id.clone(),
             sender,
             source_token,
-            source_amount,
+            source_amount: actual_received,
             destination_chain,
             destination_address,
             destination_amount,
