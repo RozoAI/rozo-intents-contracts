@@ -84,7 +84,7 @@ If the Messenger doesn't call `fill()` before the deadline, you can call `refund
 
 ### How long is the deadline?
 
-The default deadline is 24 hours (86400 seconds), but this is configurable during contract deployment via `deadline_duration`.
+The default deadline is 24 hours (86400 seconds), configurable during contract deployment via `deadline_duration`. `deadline_duration` must be greater than 0; the constructor returns `Error::InvalidDeadlineDuration` if zero is provided.
 
 ### Who are the Messenger and Relayer?
 
@@ -106,7 +106,7 @@ In early stages, both roles may be the same address operated by Rozo.
 
 ### Are the contracts audited?
 
-The contracts have been scanned with [Scout Soroban](https://github.com/CoinFabrik/scout-soroban) by CoinFabrik. No critical, medium, or minor vulnerabilities were found. See [audits/scout-report.md](../audits/scout-report.md) for details.
+The contracts have been audited by Hacken (March 2026). All findings have been remediated. The contracts were also scanned with [Scout Soroban](https://github.com/CoinFabrik/scout-soroban) by CoinFabrik. See [audits/scout-report.md](../audits/scout-report.md) for details.
 
 ### Can my funds get stuck?
 
@@ -140,7 +140,7 @@ The admin **cannot**:
 
 ### What Soroban SDK version is used?
 
-Currently using **soroban-sdk v22.0.0**. This is intentional for compatibility reasons.
+Currently using **soroban-sdk v22.0.11**.
 
 ### How is the intent_id generated?
 
