@@ -76,8 +76,15 @@ pub struct TokenForwarder;
 
 #[contractimpl]
 impl TokenForwarder {
-    /// Constructor: called automatically on deployment
-    /// This ensures only the deployer can set initial configuration
+    /// Constructor: called automatically on deployment.
+    ///
+    /// Admin is immutable after deployment. proxy_address can be rotated via
+    /// set_proxy_address(). If admin key rotation is needed, the contract is
+    /// redeployed. No user asset migration is required — the forwarder does
+    /// not hold funds.
+    ///
+    /// Redeployment procedure: deploy a new contract instance with the updated
+    /// admin key. Memo mappings must be re-registered on the new instance.
     pub fn __constructor(env: Env, admin: Address, proxy_address: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::ProxyAddress, &proxy_address);

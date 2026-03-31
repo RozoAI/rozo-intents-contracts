@@ -103,9 +103,19 @@ pub struct IntentBridge;
 
 #[contractimpl]
 impl IntentBridge {
-    /// Constructor: called automatically on deployment
-    /// This ensures only the deployer can set initial configuration
-    /// Panics if deadline_duration is 0 (would make all intents immediately expire)
+    /// Constructor: called automatically on deployment.
+    ///
+    /// All roles (Messenger, Relayer) and parameters (deadline_duration) are immutable
+    /// after deployment. This is intentional — the bridge is a fast solver that does
+    /// not hold long-term user liquidity. If key rotation or parameter changes are
+    /// needed, the contract is redeployed.
+    ///
+    /// deadline_duration must be greater than 0. Returns Error::InvalidDeadlineDuration
+    /// if zero is provided.
+    ///
+    /// Redeployment procedure: deploy a new contract instance with updated parameters.
+    /// Pending intents in the old contract remain accessible for fill/refund until
+    /// their TTL expires. No user asset migration is required.
     pub fn __constructor(
         env: Env,
         messenger: Address,
