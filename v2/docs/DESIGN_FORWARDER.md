@@ -59,7 +59,15 @@ Send $1000 with memo ──► Proxy (G Address)
 ## 2. Interface
 
 ```rust
-/// Constructor: Automatically called during deployment, only deployer can set initial config
+/// Constructor: Automatically called during deployment.
+///
+/// Admin is immutable after deployment. proxy_address can be rotated via
+/// set_proxy_address(). If admin key rotation is needed, the contract is
+/// redeployed. No user asset migration is required — the forwarder does
+/// not hold funds.
+///
+/// Redeployment procedure: deploy a new contract instance with the updated
+/// admin key. Memo mappings must be re-registered on the new instance.
 pub fn __constructor(env: Env, admin: Address, proxy_address: Address);
 
 /// Forward tokens (C Wallets → G Wallets)
@@ -135,7 +143,7 @@ pub enum Error {
     ZeroAmount = 2,
     EmptyDestination = 3,  // `to` is empty
     MemoTooLong = 4,       // > 28 bytes
-    MemoNotFound = 5,      // memo mapping doesn't exist
+    MemoNotFound = 5,      // Returned by remove_memo_mapping when mapping doesn't exist
     EmptyMemo = 6,         // memo is empty for mapping
 }
 ```
@@ -149,9 +157,14 @@ pub enum Error {
 | `__constructor` | Only called during deployment (guaranteed by Soroban) |
 | `forward` | Initialized, amount > 0, `to` not empty, memo <= 28 bytes, sender.require_auth() |
 | `set_memo_mapping` | admin.require_auth(), memo not empty, memo <= 28 bytes |
-| `remove_memo_mapping` | admin.require_auth() |
+| `remove_memo_mapping` | admin.require_auth(), memo mapping must exist (Error::MemoNotFound) |
 | `set_proxy_address` | admin.require_auth() |
 | `flush` | admin.require_auth(), amount > 0 |
+
+**TTL Management:**
+- Instance TTL: extended on every state-mutating call (7-day threshold, 14-day extension)
+- Memo mapping TTL: extended on set and read (7-day threshold, 14-day extension)
+- Prevents contract archival and silent routing failure from mapping expiration
 
 ---
 
@@ -173,6 +186,7 @@ pub enum Error {
 - [ ] set_memo_mapping emits event
 - [ ] get_memo_destination returns correct address
 - [ ] remove_memo_mapping requires admin only
+- [ ] remove_memo_mapping returns MemoNotFound for non-existent mapping
 - [ ] remove_memo_mapping emits event
 
 ### Admin Functions
@@ -263,6 +277,10 @@ impl TokenForwarder {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
+
+        if !env.storage().persistent().has(&DataKey::MemoMapping(memo.clone())) {
+            return Err(Error::MemoNotFound);
+        }
 
         env.storage().persistent().remove(&DataKey::MemoMapping(memo.clone()));
 

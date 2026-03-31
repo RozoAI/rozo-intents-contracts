@@ -12,10 +12,6 @@ evm/out
 v2/stellar/target/
 
 # Local env/secrets
-.env
-.env.*
-**/.env
-**/.env.*
 !**/.env.example
 !**/.env.sample
 
@@ -29,3 +25,5 @@ v2/stellar/target/
 
 # Local accidental files
 0.72.0
+config.bat
+node_modules
