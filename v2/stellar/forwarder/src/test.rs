@@ -176,6 +176,16 @@ fn test_remove_memo_mapping_success() {
 }
 
 #[test]
+fn test_remove_memo_mapping_not_found() {
+    let (env, _admin, _proxy_address, client) = setup_env();
+
+    let memo = String::from_str(&env, "nonexistent");
+
+    let result = client.try_remove_memo_mapping(&memo);
+    assert_eq!(result, Err(Ok(Error::MemoNotFound)));
+}
+
+#[test]
 fn test_get_memo_destination_not_found() {
     let (env, _admin, _proxy_address, client) = setup_env();
 

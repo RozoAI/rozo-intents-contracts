@@ -190,6 +190,10 @@ impl TokenForwarder {
         // Extend instance TTL to prevent contract archival
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
+        if !env.storage().persistent().has(&DataKey::MemoMapping(memo.clone())) {
+            return Err(Error::MemoNotFound);
+        }
+
         env.storage().persistent().remove(&DataKey::MemoMapping(memo.clone()));
 
         // Emit event
