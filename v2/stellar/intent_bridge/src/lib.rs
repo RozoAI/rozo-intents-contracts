@@ -92,9 +92,11 @@ pub struct IntentRefundedEvent {
     pub timestamp: u64,
 }
 
-/// Minimum TTL for intent storage (7 days in ledgers, ~5 sec per ledger)
+/// TTL constants (7 days in ledgers, ~5 sec per ledger)
 const INTENT_TTL_THRESHOLD: u32 = 120960; // 7 days
 const INTENT_TTL_EXTEND: u32 = 241920;    // 14 days
+const INSTANCE_TTL_THRESHOLD: u32 = 120960; // 7 days
+const INSTANCE_TTL_EXTEND: u32 = 241920;    // 14 days
 
 #[contract]
 pub struct IntentBridge;
@@ -133,6 +135,10 @@ impl IntentBridge {
         if !env.storage().instance().has(&DataKey::Messenger) {
             return Err(Error::NotInitialized);
         }
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         if source_amount <= 0 {
             return Err(Error::ZeroAmount);
         }
@@ -232,6 +238,9 @@ impl IntentBridge {
             .ok_or(Error::NotInitialized)?;
         messenger.require_auth();
 
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         let key = DataKey::Intent(intent_id.clone());
         let mut intent: Intent = env
             .storage()
@@ -276,6 +285,9 @@ impl IntentBridge {
 
     /// User: refund after deadline
     pub fn refund(env: Env, intent_id: BytesN<32>) -> Result<(), Error> {
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         let key = DataKey::Intent(intent_id.clone());
         let mut intent: Intent = env
             .storage()

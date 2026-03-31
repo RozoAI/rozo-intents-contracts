@@ -65,6 +65,10 @@ pub struct ProxyAddressSetEvent {
     pub timestamp: u64,
 }
 
+/// TTL constants (7 days in ledgers, ~5 sec per ledger)
+const INSTANCE_TTL_THRESHOLD: u32 = 120960; // 7 days
+const INSTANCE_TTL_EXTEND: u32 = 241920;    // 14 days
+
 #[contract]
 pub struct TokenForwarder;
 
@@ -90,6 +94,10 @@ impl TokenForwarder {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         if amount <= 0 {
             return Err(Error::ZeroAmount);
         }
@@ -136,6 +144,9 @@ impl TokenForwarder {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
 
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         if memo.len() == 0 {
             return Err(Error::EmptyMemo);
         }
@@ -165,6 +176,9 @@ impl TokenForwarder {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
 
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         env.storage().persistent().remove(&DataKey::MemoMapping(memo.clone()));
 
         // Emit event
@@ -191,6 +205,9 @@ impl TokenForwarder {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
 
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         env.storage().instance().set(&DataKey::ProxyAddress, &new_proxy_address);
 
         // Emit event
@@ -215,6 +232,9 @@ impl TokenForwarder {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         let proxy_address: Address = env
             .storage()
