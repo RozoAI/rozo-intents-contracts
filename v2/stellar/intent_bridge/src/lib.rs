@@ -57,6 +57,7 @@ pub enum Error {
     DeadlineExceeded = 9,
     DeadlineOverflow = 10,
     InvalidDeadlineDuration = 11,
+    EmptyDestination = 12,
 }
 
 /// Intent created event
@@ -151,6 +152,12 @@ impl IntentBridge {
 
         if source_amount <= 0 {
             return Err(Error::ZeroAmount);
+        }
+        if destination_amount <= 0 {
+            return Err(Error::ZeroAmount);
+        }
+        if destination_chain.len() == 0 || destination_address.len() == 0 {
+            return Err(Error::EmptyDestination);
         }
         if memo.len() > 28 {
             return Err(Error::MemoTooLong);
