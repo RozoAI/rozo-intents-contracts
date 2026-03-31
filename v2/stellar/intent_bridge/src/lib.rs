@@ -47,7 +47,6 @@ pub struct Intent {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    AlreadyInitialized = 1,
     NotInitialized = 2,
     ZeroAmount = 3,
     IntentNotFound = 4,
@@ -121,13 +120,14 @@ impl IntentBridge {
         messenger: Address,
         relayer: Address,
         deadline_duration: u64,
-    ) {
+    ) -> Result<(), Error> {
         if deadline_duration == 0 {
-            panic!("deadline_duration must be greater than 0");
+            return Err(Error::InvalidDeadlineDuration);
         }
         env.storage().instance().set(&DataKey::Messenger, &messenger);
         env.storage().instance().set(&DataKey::Relayer, &relayer);
         env.storage().instance().set(&DataKey::DeadlineDuration, &deadline_duration);
+        Ok(())
     }
 
     /// Create intent and lock funds

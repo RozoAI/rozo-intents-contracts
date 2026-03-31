@@ -71,6 +71,19 @@ fn test_constructor_sets_config() {
 }
 
 #[test]
+#[should_panic]
+fn test_constructor_zero_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let messenger = Address::generate(&env);
+    let relayer = Address::generate(&env);
+
+    // deadline_duration == 0 should fail with InvalidDeadlineDuration
+    env.register(IntentBridge, (messenger, relayer, 0u64));
+}
+
+#[test]
 fn test_create_intent_success() {
     let (env, _messenger, _relayer, client) = setup_env();
 
