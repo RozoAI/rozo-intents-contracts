@@ -71,6 +71,19 @@ fn test_constructor_sets_config() {
 }
 
 #[test]
+#[should_panic]
+fn test_constructor_zero_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let messenger = Address::generate(&env);
+    let relayer = Address::generate(&env);
+
+    // deadline_duration == 0 should fail with InvalidDeadlineDuration
+    env.register(IntentBridge, (messenger, relayer, 0u64));
+}
+
+#[test]
 fn test_create_intent_success() {
     let (env, _messenger, _relayer, client) = setup_env();
 
@@ -123,10 +136,76 @@ fn test_create_intent_zero_amount() {
         &0,
         &dest_chain,
         &dest_addr,
+        &90,
+        &memo,
+    );
+    assert_eq!(result, Err(Ok(Error::ZeroAmount)));
+}
+
+#[test]
+fn test_create_intent_zero_destination_amount() {
+    let (env, _messenger, _relayer, client) = setup_env();
+
+    let sender = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let dest_chain = String::from_str(&env, "ethereum");
+    let dest_addr = String::from_str(&env, "0x1234");
+    let memo = String::from_str(&env, "test");
+
+    let result = client.try_create_intent(
+        &sender,
+        &token_addr,
+        &100,
+        &dest_chain,
+        &dest_addr,
         &0,
         &memo,
     );
     assert_eq!(result, Err(Ok(Error::ZeroAmount)));
+}
+
+#[test]
+fn test_create_intent_empty_destination_chain() {
+    let (env, _messenger, _relayer, client) = setup_env();
+
+    let sender = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let dest_chain = String::from_str(&env, "");
+    let dest_addr = String::from_str(&env, "0x1234");
+    let memo = String::from_str(&env, "test");
+
+    let result = client.try_create_intent(
+        &sender,
+        &token_addr,
+        &100,
+        &dest_chain,
+        &dest_addr,
+        &90,
+        &memo,
+    );
+    assert_eq!(result, Err(Ok(Error::EmptyDestination)));
+}
+
+#[test]
+fn test_create_intent_empty_destination_address() {
+    let (env, _messenger, _relayer, client) = setup_env();
+
+    let sender = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let dest_chain = String::from_str(&env, "ethereum");
+    let dest_addr = String::from_str(&env, "");
+    let memo = String::from_str(&env, "test");
+
+    let result = client.try_create_intent(
+        &sender,
+        &token_addr,
+        &100,
+        &dest_chain,
+        &dest_addr,
+        &90,
+        &memo,
+    );
+    assert_eq!(result, Err(Ok(Error::EmptyDestination)));
 }
 
 #[test]

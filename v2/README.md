@@ -177,6 +177,10 @@ soroban contract deploy \
   --deadline_duration 86400
 ```
 
+> **Note:** `deadline_duration` must be greater than 0. The constructor returns
+> `Error::InvalidDeadlineDuration` if zero is provided. There is no enforced
+> upper bound — use a value appropriate for your cross-chain settlement flow.
+
 ## Contract Interfaces
 
 ### Token Forwarder
@@ -214,7 +218,9 @@ soroban contract deploy \
 - TTL management prevents intent expiration fund lockout
 
 ### Validation
-- Amount > 0 checks on all transfers
+- Amount > 0 checks on all transfers (source and destination)
+- Destination chain and address must be non-empty for intents
+- Actual escrowed amount verified via balance delta (handles fee-on-transfer tokens)
 - Memo length limit (28 bytes) prevents excessive storage
 - Deadline overflow protection with checked arithmetic
 

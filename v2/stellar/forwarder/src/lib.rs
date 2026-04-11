@@ -65,13 +65,26 @@ pub struct ProxyAddressSetEvent {
     pub timestamp: u64,
 }
 
+/// TTL constants (7 days in ledgers, ~5 sec per ledger)
+const INSTANCE_TTL_THRESHOLD: u32 = 120960; // 7 days
+const INSTANCE_TTL_EXTEND: u32 = 241920;    // 14 days
+const MEMO_TTL_THRESHOLD: u32 = 120960; // 7 days
+const MEMO_TTL_EXTEND: u32 = 241920;    // 14 days
+
 #[contract]
 pub struct TokenForwarder;
 
 #[contractimpl]
 impl TokenForwarder {
-    /// Constructor: called automatically on deployment
-    /// This ensures only the deployer can set initial configuration
+    /// Constructor: called automatically on deployment.
+    ///
+    /// Admin is immutable after deployment. proxy_address can be rotated via
+    /// set_proxy_address(). If admin key rotation is needed, the contract is
+    /// redeployed. No user asset migration is required — the forwarder does
+    /// not hold funds.
+    ///
+    /// Redeployment procedure: deploy a new contract instance with the updated
+    /// admin key. Memo mappings must be re-registered on the new instance.
     pub fn __constructor(env: Env, admin: Address, proxy_address: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::ProxyAddress, &proxy_address);
@@ -90,6 +103,10 @@ impl TokenForwarder {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         if amount <= 0 {
             return Err(Error::ZeroAmount);
         }
@@ -136,6 +153,9 @@ impl TokenForwarder {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
 
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         if memo.len() == 0 {
             return Err(Error::EmptyMemo);
         }
@@ -143,7 +163,9 @@ impl TokenForwarder {
             return Err(Error::MemoTooLong);
         }
 
-        env.storage().persistent().set(&DataKey::MemoMapping(memo.clone()), &destination);
+        let key = DataKey::MemoMapping(memo.clone());
+        env.storage().persistent().set(&key, &destination);
+        env.storage().persistent().extend_ttl(&key, MEMO_TTL_THRESHOLD, MEMO_TTL_EXTEND);
 
         // Emit event
         let event = MemoMappingSetEvent {
@@ -165,6 +187,13 @@ impl TokenForwarder {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
 
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
+        if !env.storage().persistent().has(&DataKey::MemoMapping(memo.clone())) {
+            return Err(Error::MemoNotFound);
+        }
+
         env.storage().persistent().remove(&DataKey::MemoMapping(memo.clone()));
 
         // Emit event
@@ -178,8 +207,14 @@ impl TokenForwarder {
     }
 
     /// Query: get memo destination
+    /// Extends TTL on read to keep active mappings alive
     pub fn get_memo_destination(env: Env, memo: String) -> Option<Address> {
-        env.storage().persistent().get(&DataKey::MemoMapping(memo))
+        let key = DataKey::MemoMapping(memo);
+        let result: Option<Address> = env.storage().persistent().get(&key);
+        if result.is_some() {
+            env.storage().persistent().extend_ttl(&key, MEMO_TTL_THRESHOLD, MEMO_TTL_EXTEND);
+        }
+        result
     }
 
     /// Admin: update proxy address
@@ -190,6 +225,9 @@ impl TokenForwarder {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         env.storage().instance().set(&DataKey::ProxyAddress, &new_proxy_address);
 
@@ -215,6 +253,9 @@ impl TokenForwarder {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         let proxy_address: Address = env
             .storage()

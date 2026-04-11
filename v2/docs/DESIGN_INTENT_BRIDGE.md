@@ -59,7 +59,7 @@ pub struct Intent {
     pub intent_id: BytesN<32>,
     pub sender: Address,
     pub source_token: Address,
-    pub source_amount: i128,
+    pub source_amount: i128,           // Actual escrowed amount (balance delta after transfer)
     pub destination_chain: String,
     pub destination_address: String,
     pub destination_amount: i128,
@@ -85,14 +85,25 @@ pub enum IntentStatus {
 ## 4. Interface
 
 ```rust
-/// Constructor: Automatically called during deployment, only deployer can set initial config
-/// Uses Soroban's __constructor pattern to prevent front-running initialization attacks
+/// Constructor: Automatically called during deployment.
+///
+/// All roles (Messenger, Relayer) and parameters (deadline_duration) are immutable
+/// after deployment. This is intentional — the bridge is a fast solver that does
+/// not hold long-term user liquidity. If key rotation or parameter changes are
+/// needed, the contract is redeployed. No user asset migration is required.
+///
+/// deadline_duration must be greater than 0.
+/// Returns Error::InvalidDeadlineDuration if zero is provided.
+///
+/// Redeployment procedure: deploy a new contract instance with updated parameters.
+/// Pending intents in the old contract remain accessible for fill/refund until
+/// their TTL expires.
 pub fn __constructor(
     env: Env,
     messenger: Address,         // Confirms cross-chain messages
     relayer: Address,           // Receives funds
-    deadline_duration: u64,     // Default 86400 (24h)
-);
+    deadline_duration: u64,     // Default 86400 (24h), must be > 0
+) -> Result<(), Error>;
 
 /// Create intent and lock funds
 pub fn create_intent(
@@ -147,7 +158,7 @@ pub struct IntentCreatedEvent {
     pub intent_id: BytesN<32>,
     pub sender: Address,
     pub source_token: Address,
-    pub source_amount: i128,
+    pub source_amount: i128,           // Actual escrowed amount, not requested amount
     pub destination_chain: String,
     pub destination_address: String,
     pub destination_amount: i128,
@@ -173,16 +184,17 @@ pub struct IntentRefundedEvent {
 
 ```rust
 pub enum Error {
-    AlreadyInitialized = 1,   // Reserved for upgrade compatibility
     NotInitialized = 2,
-    ZeroAmount = 3,
+    ZeroAmount = 3,            // Input amount is zero OR effective escrowed amount is zero
     IntentNotFound = 4,
-    InvalidStatus = 5,        // Terminal state cannot be changed
-    DeadlineNotReached = 6,   // Early refund attempt
+    InvalidStatus = 5,         // Terminal state cannot be changed
+    DeadlineNotReached = 6,    // Early refund attempt
     MemoTooLong = 7,
-    IntentAlreadyExists = 8,  // intent_id already exists
-    DeadlineExceeded = 9,     // fill() timeout
-    DeadlineOverflow = 10,    // Deadline calculation overflow
+    IntentAlreadyExists = 8,   // intent_id already exists
+    DeadlineExceeded = 9,      // fill() timeout
+    DeadlineOverflow = 10,     // Deadline calculation overflow
+    InvalidDeadlineDuration = 11,  // Constructor: deadline_duration == 0
+    EmptyDestination = 12,     // destination_chain or destination_address is empty
 }
 ```
 
@@ -192,26 +204,32 @@ pub enum Error {
 
 | Function | Checks |
 |----------|--------|
-| `__constructor` | Only called during deployment (guaranteed by Soroban) |
-| `create_intent` | Initialized, source_amount > 0, memo <= 28 bytes, sender.require_auth(), intent_id doesn't exist, deadline doesn't overflow |
+| `__constructor` | deadline_duration > 0 (Error::InvalidDeadlineDuration). Only called during deployment (guaranteed by Soroban) |
+| `create_intent` | Initialized, source_amount > 0, destination_amount > 0, destination_chain non-empty, destination_address non-empty, memo <= 28 bytes, sender.require_auth(), intent_id doesn't exist, deadline doesn't overflow, actual_received > 0 |
 | `fill` | messenger.require_auth(), status == PENDING, now < deadline |
 | `refund` | sender.require_auth(), status == PENDING, now >= deadline |
 
 **TTL Management:**
-- Intents stored in persistent storage
-- TTL extended on each create/fill/refund (7-day threshold, 14-day extension)
-- Prevents intent expiration causing fund lockout
+- Instance TTL: extended on every create/fill/refund (7-day threshold, 14-day extension)
+- Intent TTL: extended on every create/fill/refund (7-day threshold, 14-day extension)
+- Prevents contract archival and intent expiration causing fund lockout
 
 ---
 
 ## 9. Test Checklist
 
 - [ ] Constructor correctly sets messenger/relayer/deadline_duration
+- [ ] Constructor rejects deadline_duration == 0 with Error::InvalidDeadlineDuration
 - [ ] create_intent requires sender authorization
 - [ ] create_intent rejects source_amount <= 0
+- [ ] create_intent rejects destination_amount <= 0
+- [ ] create_intent rejects empty destination_chain
+- [ ] create_intent rejects empty destination_address
 - [ ] create_intent rejects memo > 28 bytes
 - [ ] create_intent rejects duplicate intent_id
 - [ ] create_intent locks funds to contract
+- [ ] create_intent with zero effective escrowed amount fails with ZeroAmount
+- [ ] IntentCreatedEvent.source_amount matches stored intent.source_amount
 - [ ] fill requires Messenger only
 - [ ] fill requires PENDING status only
 - [ ] fill requires before deadline (now < deadline)
@@ -244,10 +262,14 @@ impl IntentBridge {
         messenger: Address,
         relayer: Address,
         deadline_duration: u64
-    ) {
+    ) -> Result<(), Error> {
+        if deadline_duration == 0 {
+            return Err(Error::InvalidDeadlineDuration);
+        }
         env.storage().instance().set(&DataKey::Messenger, &messenger);
         env.storage().instance().set(&DataKey::Relayer, &relayer);
         env.storage().instance().set(&DataKey::DeadlineDuration, &deadline_duration);
+        Ok(())
     }
 
     pub fn create_intent(
@@ -265,6 +287,12 @@ impl IntentBridge {
         }
         if source_amount <= 0 {
             return Err(Error::ZeroAmount);
+        }
+        if destination_amount <= 0 {
+            return Err(Error::ZeroAmount);
+        }
+        if destination_chain.len() == 0 || destination_address.len() == 0 {
+            return Err(Error::EmptyDestination);
         }
         if memo.len() > 28 {
             return Err(Error::MemoTooLong);
@@ -313,24 +341,31 @@ impl IntentBridge {
             deadline,
         };
 
-        // Lock funds to contract
+        // Lock funds to contract — measure actual received amount
         let token_client = token::Client::new(&env, &source_token);
+        let balance_before = token_client.balance(&env.current_contract_address());
         token_client.transfer(&sender, &env.current_contract_address(), &source_amount);
+        let balance_after = token_client.balance(&env.current_contract_address());
+        let actual_received = balance_after - balance_before;
+        if actual_received <= 0 {
+            return Err(Error::ZeroAmount);
+        }
 
-        // Store intent
+        // Store intent with actual escrowed amount
+        let intent = Intent { source_amount: actual_received, ..intent };
         env.storage().persistent().set(&DataKey::Intent(intent_id.clone()), &intent);
 
         // Extend TTL
         extend_ttl(&env, &intent_id);
 
-        // Emit event
+        // Emit event with actual escrowed amount
         env.events().publish(
             (symbol_short!("created"),),
             IntentCreatedEvent {
                 intent_id: intent_id.clone(),
                 sender,
                 source_token,
-                source_amount,
+                source_amount: actual_received,
                 destination_chain,
                 destination_address,
                 destination_amount,
@@ -445,6 +480,8 @@ impl IntentBridge {
 // TTL constants
 const INTENT_TTL_THRESHOLD: u32 = 120960;  // ~7 days
 const INTENT_TTL_EXTEND: u32 = 241920;     // ~14 days
+const INSTANCE_TTL_THRESHOLD: u32 = 120960;
+const INSTANCE_TTL_EXTEND: u32 = 241920;
 
 fn extend_ttl(env: &Env, intent_id: &BytesN<32>) {
     env.storage().persistent().extend_ttl(

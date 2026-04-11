@@ -47,7 +47,6 @@ pub struct Intent {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    AlreadyInitialized = 1,
     NotInitialized = 2,
     ZeroAmount = 3,
     IntentNotFound = 4,
@@ -58,6 +57,7 @@ pub enum Error {
     DeadlineExceeded = 9,
     DeadlineOverflow = 10,
     InvalidDeadlineDuration = 11,
+    EmptyDestination = 12,
 }
 
 /// Intent created event
@@ -92,30 +92,43 @@ pub struct IntentRefundedEvent {
     pub timestamp: u64,
 }
 
-/// Minimum TTL for intent storage (7 days in ledgers, ~5 sec per ledger)
+/// TTL constants (7 days in ledgers, ~5 sec per ledger)
 const INTENT_TTL_THRESHOLD: u32 = 120960; // 7 days
 const INTENT_TTL_EXTEND: u32 = 241920;    // 14 days
+const INSTANCE_TTL_THRESHOLD: u32 = 120960; // 7 days
+const INSTANCE_TTL_EXTEND: u32 = 241920;    // 14 days
 
 #[contract]
 pub struct IntentBridge;
 
 #[contractimpl]
 impl IntentBridge {
-    /// Constructor: called automatically on deployment
-    /// This ensures only the deployer can set initial configuration
-    /// Panics if deadline_duration is 0 (would make all intents immediately expire)
+    /// Constructor: called automatically on deployment.
+    ///
+    /// All roles (Messenger, Relayer) and parameters (deadline_duration) are immutable
+    /// after deployment. This is intentional — the bridge is a fast solver that does
+    /// not hold long-term user liquidity. If key rotation or parameter changes are
+    /// needed, the contract is redeployed.
+    ///
+    /// deadline_duration must be greater than 0. Returns Error::InvalidDeadlineDuration
+    /// if zero is provided.
+    ///
+    /// Redeployment procedure: deploy a new contract instance with updated parameters.
+    /// Pending intents in the old contract remain accessible for fill/refund until
+    /// their TTL expires. No user asset migration is required.
     pub fn __constructor(
         env: Env,
         messenger: Address,
         relayer: Address,
         deadline_duration: u64,
-    ) {
+    ) -> Result<(), Error> {
         if deadline_duration == 0 {
-            panic!("deadline_duration must be greater than 0");
+            return Err(Error::InvalidDeadlineDuration);
         }
         env.storage().instance().set(&DataKey::Messenger, &messenger);
         env.storage().instance().set(&DataKey::Relayer, &relayer);
         env.storage().instance().set(&DataKey::DeadlineDuration, &deadline_duration);
+        Ok(())
     }
 
     /// Create intent and lock funds
@@ -133,8 +146,18 @@ impl IntentBridge {
         if !env.storage().instance().has(&DataKey::Messenger) {
             return Err(Error::NotInitialized);
         }
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         if source_amount <= 0 {
             return Err(Error::ZeroAmount);
+        }
+        if destination_amount <= 0 {
+            return Err(Error::ZeroAmount);
+        }
+        if destination_chain.len() == 0 || destination_address.len() == 0 {
+            return Err(Error::EmptyDestination);
         }
         if memo.len() > 28 {
             return Err(Error::MemoTooLong);
@@ -185,21 +208,34 @@ impl IntentBridge {
             deadline,
         };
 
-        // Lock funds to contract
+        // Lock funds to contract — measure actual received amount (balance delta)
+        // to handle fee-on-transfer or deflationary tokens correctly
         let token_client = token::Client::new(&env, &source_token);
+        let balance_before = token_client.balance(&env.current_contract_address());
         token_client.transfer(&sender, &env.current_contract_address(), &source_amount);
+        let balance_after = token_client.balance(&env.current_contract_address());
+        let actual_received = balance_after - balance_before;
+        if actual_received <= 0 {
+            return Err(Error::ZeroAmount);
+        }
+
+        // Store intent with actual escrowed amount
+        let intent = Intent {
+            source_amount: actual_received,
+            ..intent
+        };
 
         // Store intent with TTL extension
         let key = DataKey::Intent(intent_id.clone());
         env.storage().persistent().set(&key, &intent);
         env.storage().persistent().extend_ttl(&key, INTENT_TTL_THRESHOLD, INTENT_TTL_EXTEND);
 
-        // Emit event
+        // Emit event with actual escrowed amount
         let event = IntentCreatedEvent {
             intent_id: intent_id.clone(),
             sender,
             source_token,
-            source_amount,
+            source_amount: actual_received,
             destination_chain,
             destination_address,
             destination_amount,
@@ -218,6 +254,9 @@ impl IntentBridge {
             .get(&DataKey::Messenger)
             .ok_or(Error::NotInitialized)?;
         messenger.require_auth();
+
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         let key = DataKey::Intent(intent_id.clone());
         let mut intent: Intent = env
@@ -263,6 +302,9 @@ impl IntentBridge {
 
     /// User: refund after deadline
     pub fn refund(env: Env, intent_id: BytesN<32>) -> Result<(), Error> {
+        // Extend instance TTL to prevent contract archival
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
         let key = DataKey::Intent(intent_id.clone());
         let mut intent: Intent = env
             .storage()
