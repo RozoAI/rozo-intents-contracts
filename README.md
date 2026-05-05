@@ -24,6 +24,8 @@ V2 introduces a simplified cross-chain intent system with two contracts:
 
 See [v2/](./v2/) for implementation and [v2/AUDIT.md](./v2/AUDIT.md) for audit scope.
 
+**Security Audit**: V2 was audited by [Hacken](https://hacken.io/) in March 2026. Read the full report: [SCA Rozo / SDF Audit (Mar 2026)](https://hacken.io/audits/rozo/sca-rozo-sdf-audit-mar2026/).
+
 ## V1: Stellar Payment Wrapper
 
 We are starting with **V1**, a simplified version focused on Stellar that addresses two key considerations:
@@ -82,7 +84,14 @@ rozo-intents-contracts/
 - **V2 Design**: See [v2/docs/](./v2/docs/) for Token Forwarder and Intent Bridge designs
 - **Full Cross-Chain Design** (when CCTP launches): See [docs/DESIGN_README.md](./docs/DESIGN_README.md)
 
+## Audits
+
+| Version | Auditor | Date | Report |
+|---------|---------|------|--------|
+| V2 | Hacken | March 2026 | [SCA Rozo / SDF Audit (Mar 2026)](https://hacken.io/audits/rozo/sca-rozo-sdf-audit-mar2026/) |
+
 ## Links
 
 - **Website**: [https://www.rozo.ai/](https://www.rozo.ai/)
 - **Transaction Status**: [https://intents.rozo.ai/status](https://intents.rozo.ai/status)
+- **Audit Report (V2)**: [hacken.io/audits/rozo/sca-rozo-sdf-audit-mar2026](https://hacken.io/audits/rozo/sca-rozo-sdf-audit-mar2026/)
