@@ -5,7 +5,7 @@ import { Intent, IntentData, IntentStatus, ChainConfig, FillResult } from './typ
 // Updated to match the actual contract interface with address type flags
 const ROZO_INTENTS_ABI = [
   // Events
-  'event IntentCreated(bytes32 indexed intentId, address indexed sender, address sourceToken, uint256 sourceAmount, uint256 destinationChainId, bytes32 receiver, uint256 destinationAmount, uint64 deadline, bytes32 relayer)',
+  'event IntentCreated(bytes32 indexed intentId, bytes32 indexed sender, bytes32 sourceToken, uint256 sourceAmount, uint256 sourceChainId, uint256 destinationChainId, bytes32 destinationToken, bytes32 receiver, bool receiverIsAccount, uint256 destinationAmount, uint64 deadline, uint64 createdAt, bytes32 refundAddress, bytes32 relayer)',
   'event IntentFilled(bytes32 indexed intentId, bytes32 indexed relayer, bytes32 repaymentAddress, uint256 amountPaid)',
   'event IntentRefunded(bytes32 indexed intentId, address indexed refundAddress, uint256 amount)',
   'event FillAndNotifySent(bytes32 indexed intentId, address indexed relayer, bytes32 repaymentAddress, uint8 messengerId)',
@@ -120,37 +120,42 @@ export class EvmClient {
 
   /**
    * Listen for new intents
-   * Note: Event doesn't include receiverIsAccount, must fetch from contract
+   * The event carries every IntentData field, so no contract read is needed
+   * Subscribed by name: ethers v6 only passes decoded args to name or fragment subscriptions
    */
   onIntentCreated(callback: (intent: Intent, sourceChainId: number) => void): void {
-    const filter = this.contract.filters.IntentCreated();
-    this.contract.on(filter, (
+    this.contract.on('IntentCreated', (
       intentId: string,
       sender: string,
       sourceToken: string,
       sourceAmount: bigint,
+      sourceChainId: bigint,
       destinationChainId: bigint,
+      destinationToken: string,
       receiver: string,
+      receiverIsAccount: boolean,
       destinationAmount: bigint,
       deadline: bigint,
+      createdAt: bigint,
+      refundAddress: string,
       relayer: string
     ) => {
       callback({
         intentId,
-        sender,
-        refundAddress: sender, // Default to sender
-        sourceToken,
+        sender: bytes32ToAddress(sender),
+        refundAddress: bytes32ToAddress(refundAddress),
+        sourceToken: bytes32ToAddress(sourceToken),
         sourceAmount,
         destinationChainId: Number(destinationChainId),
-        destinationToken: '', // Not in event
+        destinationToken,
         receiver,
-        receiverIsAccount: false, // Default to false, should fetch from contract for actual value
+        receiverIsAccount,
         destinationAmount,
         deadline: Number(deadline),
-        createdAt: Math.floor(Date.now() / 1000), // Approximate
+        createdAt: Number(createdAt),
         status: IntentStatus.Pending,
         relayer,
-      }, this.chainConfig.chainId);
+      }, Number(sourceChainId));
     });
   }
 
@@ -279,7 +284,6 @@ export class EvmClient {
 
   /**
    * Get past IntentCreated events
-   * Note: Event doesn't include receiverIsAccount, defaults to false
    */
   async getPastIntents(fromBlock: number = 0): Promise<Intent[]> {
     const filter = this.contract.filters.IntentCreated();
@@ -291,17 +295,17 @@ export class EvmClient {
         const args = event.args;
         intents.push({
           intentId: args.intentId,
-          sender: args.sender,
-          refundAddress: args.sender, // Default
-          sourceToken: args.sourceToken,
+          sender: bytes32ToAddress(args.sender),
+          refundAddress: bytes32ToAddress(args.refundAddress),
+          sourceToken: bytes32ToAddress(args.sourceToken),
           sourceAmount: args.sourceAmount,
           destinationChainId: Number(args.destinationChainId),
-          destinationToken: '',
+          destinationToken: args.destinationToken,
           receiver: args.receiver,
-          receiverIsAccount: false, // Default, should fetch from contract for actual value
+          receiverIsAccount: args.receiverIsAccount,
           destinationAmount: args.destinationAmount,
           deadline: Number(args.deadline),
-          createdAt: Math.floor(Date.now() / 1000), // Approximate
+          createdAt: Number(args.createdAt),
           status: IntentStatus.Pending,
           relayer: args.relayer,
         });

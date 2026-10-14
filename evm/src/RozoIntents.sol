@@ -126,17 +126,7 @@ contract RozoIntents is
             relayer: relayer
         });
 
-        emit IntentCreated(
-            intentId,
-            msg.sender,
-            sourceToken,
-            sourceAmount,
-            destinationChainId,
-            receiver,
-            destinationAmount,
-            deadline,
-            relayer
-        );
+        _emitIntentCreated(_intents[intentId]);
     }
 
     /// @inheritdoc IRozoIntentsUser
@@ -487,6 +477,27 @@ contract RozoIntents is
 
         // Emit IntentFilled with relayer identity for attribution
         emit IntentFilled(intentId, relayer, repaymentAddress, amountPaid);
+    }
+
+    /// @notice Emit IntentCreated with the same values _completeFill hashes
+    /// @dev Reads from storage to avoid stack too deep in createIntent
+    function _emitIntentCreated(Intent storage intent) internal {
+        emit IntentCreated(
+            intent.intentId,
+            _addressToBytes32(intent.sender),
+            _addressToBytes32(intent.sourceToken),
+            intent.sourceAmount,
+            block.chainid,
+            intent.destinationChainId,
+            intent.destinationToken,
+            intent.receiver,
+            intent.receiverIsAccount,
+            intent.destinationAmount,
+            intent.deadline,
+            intent.createdAt,
+            _addressToBytes32(intent.refundAddress),
+            intent.relayer
+        );
     }
 
     /// @notice Check if caller qualifies as Rozo fallback

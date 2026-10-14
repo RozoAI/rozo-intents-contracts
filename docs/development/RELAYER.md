@@ -213,16 +213,25 @@ Listen to `IntentCreated` events directly:
 ```solidity
 event IntentCreated(
     bytes32 indexed intentId,
-    address indexed sender,
-    address sourceToken,
+    bytes32 indexed sender,
+    bytes32 sourceToken,
     uint256 sourceAmount,
+    uint256 sourceChainId,       // block.chainid of the source chain
     uint256 destinationChainId,
+    bytes32 destinationToken,
     bytes32 receiver,
+    bool receiverIsAccount,
     uint256 destinationAmount,
     uint64 deadline,
-    address relayer              // address(0) for open intents
+    uint64 createdAt,
+    bytes32 refundAddress,       // Stored refund address (sender if none was given)
+    bytes32 relayer              // bytes32(0) for open intents
 );
 ```
+
+The event carries every `IntentData` field, so a relayer can rebuild `IntentData` from the log alone and pass it to `fillAndNotify()`. The resulting fill hash matches the one the source chain recomputes in `notify()`. Address fields are left-padded to bytes32, as in `IntentData`.
+
+On Stellar, `intent_created` has topics `(intent_created, intent_id)` and data in the same order: `(sender, source_token, source_amount, source_chain_id, destination_chain_id, destination_token, receiver, receiver_is_account, destination_amount, deadline, created_at, refund_address, relayer)`.
 
 ### Events to Monitor
 

@@ -27,6 +27,26 @@ contract RozoIntentsTest is Test {
     uint256 internal constant SOURCE_CHAIN_ID = 8453;
     bytes32 internal constant DEST_TOKEN = bytes32(uint256(uint160(address(0x9999))));
     bytes32 internal constant RECEIVER_BYTES = bytes32(uint256(uint160(RECEIVER)));
+    uint256 internal constant EVM_DEST_CHAIN_ID = 10;
+    bytes32 internal constant INTENT_CREATED_TOPIC = keccak256(
+        "IntentCreated(bytes32,bytes32,bytes32,uint256,uint256,uint256,bytes32,bytes32,bool,uint256,uint64,uint64,bytes32,bytes32)"
+    );
+
+    // Non-indexed IntentCreated fields, in event order
+    struct IntentCreatedData {
+        bytes32 sourceToken;
+        uint256 sourceAmount;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        bytes32 destinationToken;
+        bytes32 receiver;
+        bool receiverIsAccount;
+        uint256 destinationAmount;
+        uint64 deadline;
+        uint64 createdAt;
+        bytes32 refundAddress;
+        bytes32 relayer;
+    }
 
     function setUp() public {
         token = new MockERC20("Mock USDC", "USDC", 6);
@@ -360,6 +380,105 @@ contract RozoIntentsTest is Test {
         intents.notify(0, DEST_CHAIN_ID, payload);
     }
 
+    // ============ IntentCreated Event Tests ============
+
+    function testIntentCreatedEventRebuildsIntentDataForFill() public {
+        vm.chainId(SOURCE_CHAIN_ID);
+        vm.warp(1_700_000_000);
+        bytes32 intentId = keccak256("event-intent");
+
+        vm.startPrank(SENDER);
+        token.approve(address(intents), SOURCE_AMOUNT);
+        vm.recordLogs();
+        intents.createIntent(
+            intentId,
+            address(token),
+            SOURCE_AMOUNT,
+            EVM_DEST_CHAIN_ID,
+            _addressToBytes32(address(token)),
+            RECEIVER_BYTES,
+            false, // receiverIsAccount
+            DESTINATION_AMOUNT,
+            uint64(block.timestamp + 1 hours),
+            REFUND,
+            _addressToBytes32(RELAYER)
+        );
+        vm.stopPrank();
+
+        // Rebuilt only from the event, plus the chain that emitted it
+        IntentData memory intentData = _intentDataFromCreatedEvent(address(intents));
+        assertEq(intentData.sourceChainId, block.chainid);
+        assertEq(intentData.createdAt, uint64(1_700_000_000));
+        assertEq(intentData.refundAddress, _addressToBytes32(REFUND));
+        bytes32 fillHash = keccak256(abi.encode(intentData));
+        assertEq(fillHash, _expectedFillHash(intentId));
+
+        // Destination chain: assigned relayer fills with the rebuilt data
+        vm.warp(block.timestamp + 30);
+        vm.chainId(EVM_DEST_CHAIN_ID);
+        RozoIntents destination = new RozoIntents(address(this), FEE_RECIPIENT);
+        MockMessengerAdapter destinationAdapter = new MockMessengerAdapter(0, address(destination));
+        destination.setMessengerAdapter(address(destinationAdapter));
+        destination.addRelayer(RELAYER, RelayerType.EXTERNAL);
+
+        vm.startPrank(RELAYER);
+        token.approve(address(destination), DESTINATION_AMOUNT);
+        destination.fillAndNotify(intentData, _addressToBytes32(RELAYER), false, 0);
+        vm.stopPrank();
+
+        (address filledRelayer,,) = destination.filledIntents(fillHash);
+        assertEq(filledRelayer, RELAYER);
+        assertEq(token.balanceOf(RECEIVER), DESTINATION_AMOUNT);
+        (uint256 notifyChainId, bytes memory payload,) = destinationAdapter.lastSentMessage();
+        assertEq(notifyChainId, SOURCE_CHAIN_ID);
+
+        // Source chain: notify verifies the fill hash against the stored intent
+        vm.chainId(SOURCE_CHAIN_ID);
+        uint256 relayerBefore = token.balanceOf(RELAYER);
+        rozoAdapter.simulateNotify(address(intents), EVM_DEST_CHAIN_ID, payload);
+
+        assertEq(uint256(intents.intents(intentId).status), uint256(IntentStatus.FILLED));
+        assertEq(token.balanceOf(RELAYER), relayerBefore + SOURCE_AMOUNT - _fee());
+    }
+
+    function testIntentCreatedEventUsesDefaultRefundAddress() public {
+        vm.chainId(SOURCE_CHAIN_ID);
+        vm.warp(1_700_000_000);
+        bytes32 intentId = keccak256("event-intent-default-refund");
+
+        vm.startPrank(SENDER);
+        token.approve(address(intents), SOURCE_AMOUNT);
+        vm.recordLogs();
+        intents.createIntent(
+            intentId,
+            address(token),
+            SOURCE_AMOUNT,
+            DEST_CHAIN_ID,
+            DEST_TOKEN,
+            RECEIVER_BYTES,
+            true, // receiverIsAccount
+            DESTINATION_AMOUNT,
+            uint64(block.timestamp + 1 hours),
+            address(0), // refund defaults to sender
+            bytes32(0)
+        );
+        vm.stopPrank();
+
+        IntentData memory intentData = _intentDataFromCreatedEvent(address(intents));
+        assertEq(intentData.refundAddress, _addressToBytes32(SENDER));
+        assertTrue(intentData.receiverIsAccount);
+        bytes32 fillHash = keccak256(abi.encode(intentData));
+        assertEq(fillHash, _expectedFillHash(intentId));
+
+        // Payload format: intentId, fillHash, repaymentAddress, relayer, amount, flags
+        bytes32 relayerBytes32 = _addressToBytes32(RELAYER);
+        bytes memory payload =
+            abi.encode(intentId, fillHash, relayerBytes32, relayerBytes32, DESTINATION_AMOUNT, bytes32(0));
+        rozoAdapter.simulateNotify(address(intents), DEST_CHAIN_ID, payload);
+
+        assertEq(uint256(intents.intents(intentId).status), uint256(IntentStatus.FILLED));
+    }
+
     // ============ Refund Tests ============
 
     function testRefundAfterDeadline() public {
@@ -536,6 +655,59 @@ contract RozoIntentsTest is Test {
             relayer: bytes32(0), // Open intent
             receiverIsAccount: false
         });
+    }
+
+    /// @dev Rebuild IntentData from the IntentCreated log recorded with vm.recordLogs
+    function _intentDataFromCreatedEvent(address emitter) internal returns (IntentData memory) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != emitter || logs[i].topics.length != 3 || logs[i].topics[0] != INTENT_CREATED_TOPIC) {
+                continue;
+            }
+            IntentCreatedData memory ev = abi.decode(logs[i].data, (IntentCreatedData));
+            return IntentData({
+                intentId: logs[i].topics[1],
+                sender: logs[i].topics[2],
+                refundAddress: ev.refundAddress,
+                sourceToken: ev.sourceToken,
+                sourceAmount: ev.sourceAmount,
+                sourceChainId: ev.sourceChainId,
+                destinationChainId: ev.destinationChainId,
+                destinationToken: ev.destinationToken,
+                receiver: ev.receiver,
+                destinationAmount: ev.destinationAmount,
+                deadline: ev.deadline,
+                createdAt: ev.createdAt,
+                relayer: ev.relayer,
+                receiverIsAccount: ev.receiverIsAccount
+            });
+        }
+        revert("IntentCreated not emitted");
+    }
+
+    /// @dev Fill hash computed from the stored intent, as _completeFill does on the source chain
+    function _expectedFillHash(bytes32 intentId) internal view returns (bytes32) {
+        Intent memory stored = intents.intents(intentId);
+        return keccak256(
+            abi.encode(
+                IntentData({
+                    intentId: stored.intentId,
+                    sender: _addressToBytes32(stored.sender),
+                    refundAddress: _addressToBytes32(stored.refundAddress),
+                    sourceToken: _addressToBytes32(stored.sourceToken),
+                    sourceAmount: stored.sourceAmount,
+                    sourceChainId: block.chainid,
+                    destinationChainId: stored.destinationChainId,
+                    destinationToken: stored.destinationToken,
+                    receiver: stored.receiver,
+                    destinationAmount: stored.destinationAmount,
+                    deadline: stored.deadline,
+                    createdAt: stored.createdAt,
+                    relayer: stored.relayer,
+                    receiverIsAccount: stored.receiverIsAccount
+                })
+            )
+        );
     }
 
     function _fee() internal view returns (uint256) {

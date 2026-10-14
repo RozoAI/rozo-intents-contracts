@@ -92,15 +92,21 @@ interface IRozoIntentsErrors {
 
 /// @title RozoIntents Events
 interface IRozoIntentsEvents {
+    /// @notice Carries every IntentData field so relayers can rebuild the fill hash from this event alone
     event IntentCreated(
         bytes32 indexed intentId,
-        address indexed sender,
-        address sourceToken,
+        bytes32 indexed sender,
+        bytes32 sourceToken,
         uint256 sourceAmount,
+        uint256 sourceChainId,
         uint256 destinationChainId,
+        bytes32 destinationToken,
         bytes32 receiver,
+        bool receiverIsAccount,
         uint256 destinationAmount,
         uint64 deadline,
+        uint64 createdAt,
+        bytes32 refundAddress,
         bytes32 relayer
     );
 

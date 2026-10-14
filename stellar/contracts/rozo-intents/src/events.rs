@@ -1,16 +1,23 @@
 use crate::types::{IntentStatus, RelayerType};
 use soroban_sdk::{Address, BytesN, Env, String, Symbol};
 
+/// Carries every IntentData field so relayers can rebuild the fill hash from this event alone
+#[allow(clippy::too_many_arguments)]
 pub fn emit_intent_created(
     env: &Env,
     intent_id: BytesN<32>,
-    sender: Address,
-    source_token: Address,
+    sender: BytesN<32>,
+    source_token: BytesN<32>,
     source_amount: i128,
+    source_chain_id: u64,
     destination_chain_id: u64,
+    destination_token: BytesN<32>,
     receiver: BytesN<32>,
+    receiver_is_account: bool,
     destination_amount: i128,
     deadline: u64,
+    created_at: u64,
+    refund_address: BytesN<32>,
     relayer: BytesN<32>,
 ) {
     env.events().publish(
@@ -19,10 +26,15 @@ pub fn emit_intent_created(
             sender,
             source_token,
             source_amount,
+            source_chain_id,
             destination_chain_id,
+            destination_token,
             receiver,
+            receiver_is_account,
             destination_amount,
             deadline,
+            created_at,
+            refund_address,
             relayer,
         ),
     );
