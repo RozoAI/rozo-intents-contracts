@@ -206,6 +206,7 @@ export class Relayer {
       deadline: intent.deadline,
       createdAt: intent.createdAt,
       relayer: intent.relayer, // Already bytes32
+      receiverIsAccount: intent.receiverIsAccount,
     };
   }
 

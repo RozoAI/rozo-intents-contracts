@@ -1017,14 +1017,19 @@ function adminRefund(bytes32 intentId) external onlyOwner;
 ```solidity
 event IntentCreated(
     bytes32 indexed intentId,
-    address indexed sender,
-    address sourceToken,
+    bytes32 indexed sender,
+    bytes32 sourceToken,
     uint256 sourceAmount,
+    uint256 sourceChainId,       // block.chainid of the source chain
     uint256 destinationChainId,
+    bytes32 destinationToken,
     bytes32 receiver,
+    bool receiverIsAccount,
     uint256 destinationAmount,
     uint64 deadline,
-    address relayer              // Assigned relayer from RFQ (address(0) if open)
+    uint64 createdAt,
+    bytes32 refundAddress,       // Stored refund address (sender if none was given)
+    bytes32 relayer              // Assigned relayer from RFQ (bytes32(0) if open)
 );
 
 event IntentFilled(
