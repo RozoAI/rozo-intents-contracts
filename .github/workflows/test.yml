@@ -67,5 +67,10 @@ jobs:
           test "$(arc-cast keccak "$CC")" = "0x46d6f8de6a89d4f6f2310335bf207c5b691c4a3e6363ad77fe53d73531627903"
           test "$(arc-cast keccak "$RT")" = "0x4a6726a2a9012bb4f1bfe84bf7c12edb0b0aebb5a343e657db54a806ff0564de"
 
-      - name: Test
-        run: arc-forge test
+      - name: Unit tests
+        run: arc-forge test --no-match-contract ArcFork
+
+      - name: Arc testnet fork tests (real USDC system contracts, both interfaces, dust)
+        env:
+          ARC_TESTNET_RPC: https://rpc.testnet.arc.io
+        run: arc-forge test --network arc --match-contract ArcFork -vv

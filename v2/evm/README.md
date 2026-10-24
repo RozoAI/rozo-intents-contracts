@@ -160,7 +160,7 @@ Evidence: the throwaway wallet holds 0 CELO on Celo Sepolia at the time of writi
 - F2: if the predicted address already holds code it must hash to the expected runtime (idempotent skip); any other
   code aborts with `ForeignCodeAtFactoryAddress`.
 - P2: created if missing; always verified (`isParent`, `factory()`, `destination()`, runtime hash).
-- Arc (5042 / 5042002): broadcast requires `tx.gasprice >= 25 gwei` and `>= block.basefee`. The wrapper uses
+- Arc (5042 / 5042002): the wrapper passes `--network arc` so simulation runs under Arc execution semantics. Broadcast requires `tx.gasprice >= 25 gwei` and `>= block.basefee`. The wrapper uses
   legacy fee mode (`--legacy --with-gas-price`) at `max(25 gwei, 1.2 × basefee)`; Base / Celo use plain EIP-1559
   estimation. Fee styles are never mixed in one transaction.
 - The private key is read only from `DEPLOYER_PRIVATE_KEY` (`vm.envOr`). Nothing prints it; the broadcast log was

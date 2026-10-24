@@ -39,7 +39,7 @@ if [[ "$FAMILY" == "arc" ]]; then
   FLOOR=25000000000
   GP=$(( BASEFEE * 12 / 10 )); (( GP < FLOOR )) && GP=$FLOOR
   echo "arc: basefee=$BASEFEE wei, using legacy gasPrice=$GP wei"
-  ARGS+=(--legacy --with-gas-price "$GP")
+  ARGS+=(--network arc --legacy --with-gas-price "$GP")
 fi
 if [[ "$MODE" == "--broadcast" ]]; then
   ARGS+=(--broadcast --slow)
