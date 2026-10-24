@@ -34,3 +34,43 @@ jobs:
 
       - name: Build Wasm
         run: cargo build --locked --release --target wasm32v1-none
+
+  v2-evm:
+    name: v2 EVM contracts (Arc Foundry)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: v2/evm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      # Arc Foundry is not installable through foundryup / foundry-toolchain; pin the release archive + sha256.
+      - name: Install Arc Foundry v0.8.0-2
+        run: |
+          set -euo pipefail
+          curl -fsSL -o arc-foundry.tar.gz https://github.com/circlefin/arc-foundry/releases/download/v0.8.0-2/arc-foundry-v0.8.0-2-x86_64-unknown-linux-gnu.tar.gz
+          echo "088bdb96a84418b757f9825d491e702792f1d1d1e29a9145af305a6600a79556  arc-foundry.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" && tar -xzf arc-foundry.tar.gz
+          mv forge "$HOME/.local/bin/arc-forge" && mv cast "$HOME/.local/bin/arc-cast" && mv anvil "$HOME/.local/bin/arc-anvil"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/arc-forge" --version
+
+      - name: Build (frozen settings) and assert the frozen bytecode hashes
+        run: |
+          set -euo pipefail
+          arc-forge build
+          CC=$(jq -r .bytecode.object out/MPForwarderFactoryV2.sol/MPForwarderFactoryV2.json)
+          RT=$(jq -r .deployedBytecode.object out/MPForwarderFactoryV2.sol/MPForwarderFactoryV2.json)
+          test "$(arc-cast keccak "$CC")" = "0x46d6f8de6a89d4f6f2310335bf207c5b691c4a3e6363ad77fe53d73531627903"
+          test "$(arc-cast keccak "$RT")" = "0x4a6726a2a9012bb4f1bfe84bf7c12edb0b0aebb5a343e657db54a806ff0564de"
+
+      - name: Unit tests
+        run: arc-forge test --no-match-contract ArcFork
+
+      - name: Arc testnet fork tests (real USDC system contracts, both interfaces, dust)
+        env:
+          ARC_TESTNET_RPC: https://rpc.testnet.arc.io
+        run: arc-forge test --network arc --match-contract ArcFork -vv
