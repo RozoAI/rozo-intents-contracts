@@ -126,24 +126,38 @@ Dust findings (fork tests `test/ArcFork.t.sol`, confirmed by the drill): the nat
 including sub-micro-USDC dust; the ERC-20 view path moves `floor(balance / 1e12)` and leaves the dust on the
 clone, which a later `flushETH` sweeps. Flushing both interfaces never double-pays.
 
-### Base Sepolia (chainId 84532) — NOT YET BROADCAST (blocked on gas, see below)
+### Base Sepolia (chainId 84532) — LIVE, read back, flush drill passed (2026-10-25)
 
-Dry run against the live RPC passes (chain id read from RPC, Nick's runtime verified, F2 / P2 predicted and
-simulated at the same addresses as Arc testnet). The throwaway wallet has 0 ETH on Base Sepolia and every
-login-free faucet reachable from this machine was blocked on 2026-10-25:
+F2 and P2 were broadcast through Nick's factory by the 10B/10C deployer wallet `0xf6DFE3f4…76EC`
+(same deterministic bytes, so the deploy script run from a second wallet found them and verified instead of redeploying,
+exactly the idempotent path it is tested for):
 
-| Faucet | Result |
-| --- | --- |
-| Google Cloud Web3 faucet | no Base Sepolia network offered (only Ethereum Sepolia, Celo Sepolia, …) and requires Google sign-in |
-| Circle faucet | works for USDC only (no ETH) |
-| Bware Labs | HTTP 530 |
-| ethereum-ecosystem.com | HTTP 402 (paid) |
-| Triangle | HTTP 503 |
-| pk910 PoW faucet (Sepolia, then bridge) | Cloudflare Turnstile checkbox needs a human click |
-| Alchemy / QuickNode | require ≥ 0.001 ETH on Ethereum mainnet on the address |
+| Step | tx | Result |
+| --- | --- | --- |
+| F2 via Nick's factory | `0x7d354060956c7e7c5c71bbbc21db7cdbfcbb93180ec333263d0dbff11b265eb3` | status 1, gasUsed 981,001, block 49951782 (2026-10-25T07:10:25Z) |
+| P2 = `createForwarder(hub, 0)` | `0x66c61195355710cd728c4eb6b8bce52e73c6d66e3b4ce858b7e3977a38a69173` | status 1, gasUsed 416,530, block 49951785 |
 
-To finish: send ≥ 0.005 Base Sepolia ETH to the drill wallet (or any wallet, then run the deploy with that key) and run
-`DEPLOYER_PRIVATE_KEY=… script/deploy-testnet.sh base_sepolia --broadcast`, then the read-back block above.
+Read-back after confirmation (`eth_getCode` / `eth_call` against `https://sepolia.base.org`):
+
+| Check | On chain | Expected | ok |
+| --- | --- | --- | --- |
+| F2 address | `0xcfa4aff9A884F51997ceE2916b7D31aEE9aFb9f7` | same as Arc testnet | ✅ |
+| `keccak256(eth_getCode(F2))` | `0x4a6726a2…0564de` | `0x4a6726a2…0564de` | ✅ |
+| P2 address = `F2.getForwarderAddress(hub, 0)` | `0x7E9b8B4662EBB74Ad488E8F69705A27Bfb6EcFD8` | same | ✅ |
+| `P2.factory()` | `0xcfa4aff9…b9f7` | F2 | ✅ |
+| `P2.destination()` | `0x05c84533…2705` | hub | ✅ |
+| `F2.isParent(P2)` | true | true | ✅ |
+| `keccak256(eth_getCode(P2))` | `0x4c384edb…3641` | `0x4c384edb…3641` | ✅ |
+
+Flush drill with real Base Sepolia ETH (`script/TestnetFlushDrill.s.sol`, label `test:20261025-base`, native leg only;
+the drill wallet holds no Base Sepolia USDC, the ERC-20 path is covered by the Arc drill above and by unit tests):
+
+| Leg | tx | Result (on chain) |
+| --- | --- | --- |
+| pay 0.001 ETH to clone `0xeC4A0994…70A1` (no code yet) | `0xf5df3bf733cde7cbe4de7b29a981452438f866a7979fdf4f8178c8cdd5146423` | status 1, gasUsed 21,000 |
+| `cloneForwarderAndFlush(P2, salt, 0x0, false)` | `0xfd979d499ad75879d2b1501c1e5922ed6934c5c6abda6d067471c7f361d6bf50` | status 1, gasUsed 135,923; hub native 0 → 0.001 ETH; clone balance 0; clone code = 45-byte EIP-1167 runtime pointing at P2; `clone.destination()` = hub |
+
+Broadcast log: `broadcast/TestnetFlushDrill.s.sol/84532/run-latest.json`.
 
 ### Celo Sepolia (chainId 11142220) — 未验收 (not accepted)
 
