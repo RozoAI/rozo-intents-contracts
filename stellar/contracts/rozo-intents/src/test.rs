@@ -3,9 +3,9 @@
 use super::*;
 use crate::types::{CreateIntentParams, IntentStatus, RelayerType};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
+    testutils::{Address as _, Events, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, BytesN, Env, String,
+    Address, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
 };
 
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, TokenClient<'a>) {
@@ -85,6 +85,71 @@ fn generate_intent_id(env: &Env) -> BytesN<32> {
 fn address_to_bytes32(env: &Env, _addr: &Address) -> BytesN<32> {
     // Simplified conversion for testing
     BytesN::from_array(env, &[2u8; 32])
+}
+
+type IntentCreatedData = (
+    BytesN<32>, // sender
+    BytesN<32>, // source_token
+    i128,       // source_amount
+    u64,        // source_chain_id
+    u64,        // destination_chain_id
+    BytesN<32>, // destination_token
+    BytesN<32>, // receiver
+    bool,       // receiver_is_account
+    i128,       // destination_amount
+    u64,        // deadline
+    u64,        // created_at
+    BytesN<32>, // refund_address
+    BytesN<32>, // relayer
+);
+
+// Topics and data of the first event with this name emitted by the contract
+fn find_event(env: &Env, contract: &Address, name: &str) -> (Vec<Val>, Val) {
+    let name = Symbol::new(env, name);
+    for (emitter, topics, data) in env.events().all().iter() {
+        if emitter == *contract
+            && Symbol::try_from_val(env, &topics.get(0).unwrap()) == Ok(name.clone())
+        {
+            return (topics, data);
+        }
+    }
+    panic!("event not emitted");
+}
+
+// Rebuild IntentData from the intent_created event only
+fn intent_data_from_created_event(env: &Env, contract: &Address) -> IntentData {
+    let (topics, data) = find_event(env, contract, "intent_created");
+    let (
+        sender,
+        source_token,
+        source_amount,
+        source_chain_id,
+        destination_chain_id,
+        destination_token,
+        receiver,
+        receiver_is_account,
+        destination_amount,
+        deadline,
+        created_at,
+        refund_address,
+        relayer,
+    ) = IntentCreatedData::try_from_val(env, &data).unwrap();
+    IntentData {
+        intent_id: BytesN::try_from_val(env, &topics.get(1).unwrap()).unwrap(),
+        sender,
+        refund_address,
+        source_token,
+        source_amount,
+        source_chain_id,
+        destination_chain_id,
+        destination_token,
+        receiver,
+        destination_amount,
+        deadline,
+        created_at,
+        relayer,
+        receiver_is_account,
+    }
 }
 
 #[test]
@@ -405,4 +470,71 @@ fn test_admin_set_intent_relayer() {
 
     let intent = client.get_intent(&intent_id);
     assert_eq!(intent.relayer, new_relayer);
+}
+
+#[test]
+fn test_intent_created_event_rebuilds_fill_hash() {
+    let (env, contract, owner, sender, receiver, relayer, token, _token_client) = setup_env();
+
+    let client = RozoIntentsContractClient::new(&env, &contract);
+    let intent_id = generate_intent_id(&env);
+    let refund = Address::generate(&env);
+    let relayer_bytes = crate::address_to_bytes32(&env, &relayer);
+
+    env.ledger().set(LedgerInfo {
+        timestamp: 1000,
+        ..env.ledger().get()
+    });
+
+    let params = CreateIntentParams {
+        intent_id: intent_id.clone(),
+        source_token: token.clone(),
+        source_amount: 1_000_000_000i128,
+        destination_chain_id: 8453u64,
+        destination_token: BytesN::from_array(&env, &[9u8; 32]),
+        receiver: crate::address_to_bytes32(&env, &receiver),
+        receiver_is_account: true,
+        destination_amount: 990_000_000i128,
+        deadline: 2000u64,
+        refund_address: refund.clone(),
+        relayer: relayer_bytes.clone(), // assigned relayer
+    };
+    client.create_intent(&sender, &params);
+
+    let intent_data = intent_data_from_created_event(&env, &contract);
+    assert_eq!(intent_data.intent_id, intent_id);
+    assert_eq!(intent_data.source_chain_id, 1500);
+    assert_eq!(intent_data.created_at, 1000);
+    assert_eq!(
+        intent_data.refund_address,
+        crate::address_to_bytes32(&env, &refund)
+    );
+    assert!(intent_data.receiver_is_account);
+    let fill_hash = compute_fill_hash(&env, &intent_data);
+
+    env.ledger().set(LedgerInfo {
+        timestamp: 1100,
+        ..env.ledger().get()
+    });
+
+    // complete_fill reports the hash it verifies against when a notification does not match
+    let adapter = Address::generate(&env);
+    client.set_msger_adapter(&owner, &0u32, &adapter);
+    let wrong_hash = zero_bytes32(&env);
+    let payload = encode_notify_payload(
+        &env,
+        &intent_id,
+        &wrong_hash,
+        &relayer_bytes,
+        &relayer_bytes,
+        990_000_000i128,
+        false,
+    );
+    client.notify(&adapter, &0u32, &8453u64, &payload);
+
+    let (_, data) = find_event(&env, &contract, "intent_failed");
+    let (expected_fill_hash, received_fill_hash) =
+        <(BytesN<32>, BytesN<32>)>::try_from_val(&env, &data).unwrap();
+    assert_eq!(received_fill_hash, wrong_hash);
+    assert_eq!(expected_fill_hash, fill_hash);
 }

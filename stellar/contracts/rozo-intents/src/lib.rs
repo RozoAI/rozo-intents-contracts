@@ -86,16 +86,22 @@ impl RozoIntentsContract {
         };
         set_intent(&env, &params.intent_id, &intent);
 
+        // Same values complete_fill hashes
         emit_intent_created(
             &env,
             params.intent_id,
-            sender,
-            params.source_token,
+            address_to_bytes32(&env, &sender),
+            address_to_bytes32(&env, &params.source_token),
             params.source_amount,
+            get_chain_id(&env),
             params.destination_chain_id,
+            params.destination_token,
             params.receiver,
+            params.receiver_is_account,
             params.destination_amount,
             params.deadline,
+            intent.created_at,
+            address_to_bytes32(&env, &params.refund_address),
             params.relayer,
         );
 
