@@ -104,6 +104,20 @@ native clone `0xa348F871b4c53A274b847153741F309360e917b2`, same on every chain):
 | Chain | Leg | Pay tx | Flush tx | Hub received (Transfer log) |
 | --- | --- | --- | --- | --- |
 | Base | USDC `0x8335…2913` | `0x1b1722b44b13b2b966e466b2746dcc42939537bddc64b1ce52aa04e073dd0fb8` | `0x88a0a0e786c5163ce1c2d5d7cf392982bbb8c3b491aa68b92805beb052b6500b` | 1.000000 USDC (hub 13525.916327 → 13526.916327) |
+| Ethereum | USDC `0xA0b8…eB48` | `0x997a1981a689be80af0be925e40de702fadaf0a7111872871d37af8bd03f1644` (E2E wallet) | `0x3fc3c6a8c4cedf6b61af538c1f684c2ccaec560330cec46aed313ce1d24d3e9a` | 0.250000 USDC |
+| Ethereum | USDT `0xdAC1…1ec7` (no-bool token, `isUSDT=true`) | `0xab195fb15b5ddb602ff9537b04fb5294454c1c7e8b33fda9857ca81a7332dfae` (E2E) | `0x4f6a262fa49b029c5bf9e306ef8ccb250797e845c70399eb6647068cfa000e07` | 0.040000 USDT |
+| Arbitrum | USDC `0xaf88…5831` | `0x22a08bc4e34666838dca59cb78747856455244e45a3baf2f050097851ca70759` (E2E) | `0x6867275f99460e5425caa684e5c0d529e5186fa91253dd4222ebac37530e4446` | 0.150000 USDC |
+| Polygon | USDC `0x3c49…3359` | `0x215f9df2ebad86f4906a3f6f9e891bf594393ee1bfed2d174e6337140501b972` (E2E) | `0xcb56a2c5e11c23142a32ec819705acbdb8fc2bc3e46ef6d7ffd7a1a660ac0226` | 0.080000 USDC |
+| BNB Chain | USDT `0x55d3…7955` (18 dec) | `0x07b7f23eab321fb7a5ed94e9249a07eb9e8d91856ddfc38c9ac3592ae2f798b3` (E2E) | `0xe4a15f597004e098b6f1a85a3f0d91bcd773872244d9c3b44583d6ef9498823e` | 0.02 USDT |
+| HyperEVM | USDC `0xb883…630f` | LI.FI from Base `0xf4e4e7a8ad7ecf68f517a1837f5f0ec5ba85ddb52a813761b8dab9ac5058e93b` (D2) | `0xd46baba105789bc4415cbb4ba30d118b694474cb07efd2de96723c634a611531` | 0.535554 USDC |
+| World Chain | USDC `0x79A0…24d1` | LI.FI from Base `0x0c69030d6b51ce44f957b532982308d72181d0b7060cc5d2912aa08cd7ab9176` (D2) | `0x7859c50632260fce8fbdb21a8797c1da40f1b05e803fe06d6c08a570abfacf80` | 0.547970 USDC |
+| Arc | native USDC (18 dec, `flushETH` path, native clone) | LI.FI from Base `0x52232d735db0f10814e5194bc8ff55d152a050067c8d2e24cca7ec315b474eb2` (D2) | `0xb468897acb129d704b59a6777415e846d03a1fc14ee0ad286fe3da4c03ec265c` | 0.444220 USDC (system log from `0xffff…fffe`) |
+| Arc | USDC via `0x3600…0000` ERC-20 view (erc20 clone) | LI.FI from Base `0xed9e3bb29d3784dc8ce23acdc22f1a4e575dae03ae556364a77ee76a779065da` (D2) | `0x027e179a8ef66096329c6f6566d451f1baf54da4bef2b8289e4c7c416bb73e56` | 0.543920 USDC (both logs: 18-dec system + 6-dec `0x3600`) |
+| Celo | USDC `0xcebA…118C` | LI.FI from Base `0xcf0998acabedc5610d13c570a2ecfcad86621d438d5e989a966e32cdc84b3c68` (E2E) | `0x49a3d2fab5a75d0856c15bcfb6f28ef6e1238494b1a8f5a8e73c58a025f9182a` | 0.487285 USDC |
+
+Every flush receipt's `Transfer` log to the hub equals the clone's full balance; all clone balances read 0 afterwards.
+Not covered live: Celo USDT `0x4806…3D5e` (no test-wallet source; unit tests cover the no-bool path and Ethereum USDT
+covers it live) and native ETH on an Ethereum-family chain (Arc native covers `flushETH`).
 
 Two wrapper fixes found during the deploy: a bare-hex key (no `0x`) was parsed as 0 by `vm.envOr` (`MissingDeployerKey`),
 so the wrapper now normalises the prefix; and on Arc `--with-gas-price` only sets the broadcast price, the simulation's
