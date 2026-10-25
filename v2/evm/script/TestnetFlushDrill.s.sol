@@ -63,7 +63,7 @@ contract TestnetFlushDrill is Script {
     function run() external {
         (Cfg memory c, DeployV2 d) = _load();
         bool broadcasting = vm.isContext(VmSafe.ForgeContext.ScriptBroadcast);
-        if (broadcasting && !d.isBroadcastAllowed(c.chainId)) revert DeployV2.BroadcastNotAllowed(c.chainId);
+        if (broadcasting && !d.isTestnet(c.chainId)) revert DeployV2.BroadcastNotAllowed(c.chainId);
         console2.log("chainId / F2 / P2 / hub", c.chainId);
         console2.log(c.f2, c.p2, c.hub);
         _report(c, "before");

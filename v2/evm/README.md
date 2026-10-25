@@ -69,6 +69,18 @@ All 9 mainnets and the 3 testnets return the same 69-byte runtime, byte-identica
 
 `DeployV2.s.sol` re-checks this on every run and aborts on any difference.
 
+## Mainnet deploy
+
+```bash
+# dry run (any key value works for estimation; broadcast refused without MAINNET_CHAIN_ID)
+DEPLOYER_PRIVATE_KEY=0x1 script/deploy-mainnet.sh base
+# broadcast: the key comes from the environment only (e.g. a Keychain read in the same command), one chain per run
+DEPLOYER_PRIVATE_KEY=$(security find-generic-password -s ai.rozo.forwarder-v2-deployer -a D2 -w) script/deploy-mainnet.sh base --broadcast
+```
+
+Networks: `ethereum base bnb arbitrum polygon hyperevm world arc celo` (override the RPC with `RPC_URL=`). BNB uses
+`--legacy`; Arc uses `--legacy --with-gas-price` with the 25 gwei floor; everything else uses EIP-1559 estimation.
+
 ## Mainnet gas estimates (read-only `eth_estimateGas`, 2026-10-25; no mainnet broadcast was made)
 
 F2 deployment through Nick's factory estimates at **998,908 gas** on every chain (1,000,657 on Arbitrum).
@@ -155,7 +167,10 @@ Evidence: the throwaway wallet holds 0 CELO on Celo Sepolia at the time of writi
 
 - Reads `eth_chainId` from the RPC and requires it to equal the EVM's `block.chainid`.
 - Broadcast allowlist (this phase): **84532, 5042002, 11142220 only**. Any other chain id can be queried and estimated but
-  `--broadcast` reverts with `BroadcastNotAllowed`. The 9 mainnets are tested to be rejected (`test/DeployV2.t.sol`).
+  `--broadcast` reverts with `BroadcastNotAllowed`. Testnets are always allowed. A mainnet is allowed only when the
+  environment variable `MAINNET_CHAIN_ID` equals the chain id read from the RPC; `script/deploy-mainnet.sh <chain>
+  --broadcast` sets it from the chain named on the command line, one chain per invocation. Without it the 9 mainnets
+  are rejected, and naming one mainnet never unlocks another (`test/DeployV2.t.sol`).
 - Nick's factory runtime must be the exact 69 bytes read from Ethereum mainnet; otherwise `NicksFactoryRuntimeMismatch`.
 - F2: if the predicted address already holds code it must hash to the expected runtime (idempotent skip); any other
   code aborts with `ForeignCodeAtFactoryAddress`.

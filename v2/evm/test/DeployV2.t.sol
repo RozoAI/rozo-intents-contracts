@@ -20,16 +20,28 @@ contract DeployV2Test is Test {
 
     // ============ Allowlist ============
 
-    function test_BroadcastAllowlist_TestnetsOnly() public view {
-        assertTrue(s.isBroadcastAllowed(84532));
-        assertTrue(s.isBroadcastAllowed(5042002));
-        assertTrue(s.isBroadcastAllowed(11142220));
+    function test_BroadcastAllowlist_TestnetsAlways() public view {
+        assertTrue(s.isBroadcastAllowed(84532, 0));
+        assertTrue(s.isBroadcastAllowed(5042002, 0));
+        assertTrue(s.isBroadcastAllowed(11142220, 0));
+        assertFalse(s.isBroadcastAllowed(11155111, 0)); // Ethereum Sepolia is not a target
+        assertFalse(s.isBroadcastAllowed(31337, 0));
+        assertFalse(s.isBroadcastAllowed(31337, 31337)); // not a target even when named explicitly
+    }
+
+    function test_BroadcastAllowlist_MainnetNeedsExplicitChainId() public view {
         uint256[9] memory mainnets = [uint256(1), 8453, 56, 42161, 137, 999, 480, 5042, 42220];
         for (uint256 i; i < mainnets.length; i++) {
-            assertFalse(s.isBroadcastAllowed(mainnets[i]), "mainnet must not be broadcastable in this phase");
+            assertTrue(s.isMainnetTarget(mainnets[i]));
+            assertFalse(s.isBroadcastAllowed(mainnets[i], 0), "mainnet must not be broadcastable without MAINNET_CHAIN_ID");
+            assertTrue(s.isBroadcastAllowed(mainnets[i], mainnets[i]), "mainnet broadcastable when named explicitly");
+            for (uint256 j; j < mainnets.length; j++) {
+                if (i == j) continue;
+                assertFalse(s.isBroadcastAllowed(mainnets[i], mainnets[j]), "naming another mainnet must not unlock this one");
+            }
         }
-        assertFalse(s.isBroadcastAllowed(11155111)); // Ethereum Sepolia is not a target either
-        assertFalse(s.isBroadcastAllowed(31337));
+        assertFalse(s.isMainnetTarget(11155111));
+        assertFalse(s.isMainnetTarget(0));
     }
 
     // ============ Nick's factory checks ============

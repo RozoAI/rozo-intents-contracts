@@ -16,8 +16,11 @@ import { MPForwarderV2 } from "../src/MPForwarderV2.sol";
  *   - F2 is asserted against CREATE2(0x4e59…, SALT_F2, keccak256(creationCode)) before and after.
  *   - Idempotent: an address that already holds the expected runtime is skipped; an address that
  *     holds any other code aborts the run (never deploy "next to" foreign code).
- *   - Broadcast allowlist: the chain id is read from the RPC and only 84532 / 5042002 / 11142220
- *     may be broadcast to in this (testnet) phase. Any other chain can only be queried / estimated.
+ *   - Broadcast allowlist: the chain id is read from the RPC. Testnets 84532 / 5042002 / 11142220 may
+ *     always be broadcast to. The 9 production chains (1 / 8453 / 56 / 42161 / 137 / 999 / 480 / 5042 /
+ *     42220) may be broadcast to only when the environment variable MAINNET_CHAIN_ID equals the chain
+ *     id read from the RPC (one chain per invocation, set explicitly by the operator). Any other
+ *     chain can only be queried / estimated.
  *   - Arc fee floor: on Arc chains a broadcast requires the effective gas price to be >= 25 gwei
  *     and >= the current base fee (pass --legacy --with-gas-price, or --with-gas-price plus
  *     --priority-gas-price; never both styles on one transaction).
@@ -54,9 +57,22 @@ contract DeployV2 is Script {
 
     // ============ Pure helpers (also used by tests) ============
 
-    /// @notice Testnet-phase broadcast allowlist. Mainnet chain ids are deliberately absent.
-    function isBroadcastAllowed(uint256 chainId) public pure returns (bool) {
+    /// @notice Testnet broadcast allowlist (always allowed).
+    function isTestnet(uint256 chainId) public pure returns (bool) {
         return chainId == 84532 || chainId == ARC_TESTNET || chainId == 11142220;
+    }
+
+    /// @notice The 9 production chains F2 / P2 are deployed to.
+    function isMainnetTarget(uint256 chainId) public pure returns (bool) {
+        return chainId == 1 || chainId == 8453 || chainId == 56 || chainId == 42161 || chainId == 137 || chainId == 999
+            || chainId == 480 || chainId == ARC_MAINNET || chainId == 42220;
+    }
+
+    /// @notice Broadcast allowlist. `mainnetChainId` is the operator's explicit MAINNET_CHAIN_ID (0 = unset):
+    ///         a mainnet may only be broadcast to when it equals the chain id read from the RPC.
+    function isBroadcastAllowed(uint256 chainId, uint256 mainnetChainId) public pure returns (bool) {
+        if (isTestnet(chainId)) return true;
+        return isMainnetTarget(chainId) && mainnetChainId == chainId;
     }
 
     function isArc(uint256 chainId) public pure returns (bool) {
@@ -165,7 +181,8 @@ contract DeployV2 is Script {
     function run() external {
         uint256 chainId = rpcChainId();
         bool broadcasting = vm.isContext(VmSafe.ForgeContext.ScriptBroadcast);
-        if (broadcasting && !isBroadcastAllowed(chainId)) revert BroadcastNotAllowed(chainId);
+        uint256 mainnetChainId = vm.envOr("MAINNET_CHAIN_ID", uint256(0));
+        if (broadcasting && !isBroadcastAllowed(chainId, mainnetChainId)) revert BroadcastNotAllowed(chainId);
 
         verifyNicksFactory();
         address f2 = predictFactory();
@@ -174,6 +191,7 @@ contract DeployV2 is Script {
 
         console2.log("chainId                     ", chainId);
         console2.log("broadcast                   ", broadcasting);
+        console2.log("MAINNET_CHAIN_ID (env)      ", mainnetChainId);
         console2.log("Nick's factory runtime ok    ", true);
         console2.log("F2 (predicted)              ", f2);
         console2.log("P2 (predicted)              ", p2);
