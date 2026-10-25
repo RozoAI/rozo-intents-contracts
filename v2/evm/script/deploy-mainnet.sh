@@ -2,6 +2,7 @@
 # Mainnet deploy wrapper for script/DeployV2.s.sol (one chain per invocation).
 #
 #   DEPLOYER_PRIVATE_KEY=... script/deploy-mainnet.sh <ethereum|base|bnb|arbitrum|polygon|hyperevm|world|arc|celo> [--broadcast]
+#   SCRIPT=script/FlushDrill.s.sol DRILL_TOKEN=... DRILL_TOKEN_UNITS=... script/deploy-mainnet.sh <net> [--broadcast]
 #
 # - The private key is read ONLY from the DEPLOYER_PRIVATE_KEY environment variable (the Solidity
 #   script reads it with vm.envUint). It is never placed in argv, echoed or written to disk.
@@ -14,6 +15,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 : "${DEPLOYER_PRIVATE_KEY:?DEPLOYER_PRIVATE_KEY must be set in the environment (never pass it as an argument)}"
+# Normalise: strip whitespace, add the 0x prefix if the store holds bare hex (vm.envUint needs 0x for hex).
+DEPLOYER_PRIVATE_KEY=$(printf %s "$DEPLOYER_PRIVATE_KEY" | tr -d '[:space:]')
+case "$DEPLOYER_PRIVATE_KEY" in 0x*) ;; *) DEPLOYER_PRIVATE_KEY="0x$DEPLOYER_PRIVATE_KEY" ;; esac
+if [[ ! "$DEPLOYER_PRIVATE_KEY" =~ ^0x[0-9a-fA-F]{64}$ ]]; then echo "refusing: DEPLOYER_PRIVATE_KEY is not a 32-byte hex key" >&2; exit 4; fi
 export DEPLOYER_PRIVATE_KEY
 
 FORGE=${FORGE:-arc-forge}
@@ -40,13 +45,14 @@ if [[ "$GOT" != "$WANT" ]]; then
 fi
 case "$GOT" in 1|8453|56|42161|137|999|480|5042|42220) ;; *) echo "refusing: chainId $GOT not in mainnet allowlist" >&2; exit 3 ;; esac
 
-ARGS=(script script/DeployV2.s.sol --rpc-url "$URL" -vvvv)
+ARGS=(script "${SCRIPT:-script/DeployV2.s.sol}" --rpc-url "$URL" -vvvv)
 if [[ "$FAMILY" == "arc" ]]; then
   BASEFEE=$("$CAST" base-fee --rpc-url "$URL")
   FLOOR=25000000000
   GP=$(( BASEFEE * 12 / 10 )); (( GP < FLOOR )) && GP=$FLOOR
   echo "arc: basefee=$BASEFEE wei, using legacy gasPrice=$GP wei"
-  ARGS+=(--network arc --legacy --with-gas-price "$GP")
+  # --gas-price sets tx.gasprice in the simulation (so requireArcFee sees the real price); --with-gas-price is the broadcast price. Same value, legacy only.
+  ARGS+=(--network arc --legacy --gas-price "$GP" --with-gas-price "$GP")
 elif [[ "$FAMILY" == "legacy" ]]; then
   # BNB Chain: legacy fee market (gasPrice only).
   ARGS+=(--legacy)

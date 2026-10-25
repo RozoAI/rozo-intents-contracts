@@ -9,7 +9,7 @@ through Nick's deterministic deployment proxy. Spec: ainative
 | `src/MPForwarderFactoryV2.sol` | No owner, no constructor. `createForwarder` / `cloneForwarder` / `cloneForwarderAndFlush` / `getCloneAddress` / `getForwarderAddress`, events `ForwarderCreated`, `CloneCreated`. Only parents it created (`isParent`) can be cloned. |
 | `src/MPForwarderV2.sol` | Clone implementation. Based on `v1/evm/src/MPForwarderV1.sol` with two changes: safe ERC-20 transfer (`transfer()` returning `false` reverts, no-return tokens accepted, token must have code) and Arc USDC reachable through both interfaces (`flushETH` for the native 18-dec balance, `flushERC20(0x3600…)` for the 6-dec view). |
 | `script/DeployV2.s.sol` | Deploys F2 via Nick's factory, creates P2, verifies everything, idempotent, testnet broadcast allowlist, Arc fee floor. |
-| `script/TestnetFlushDrill.s.sol` | Small-amount pay + flush drill on a testnet (native and ERC-20 legs). |
+| `script/FlushDrill.s.sol` | Small-amount pay + flush drill on a testnet (native and ERC-20 legs). |
 | `script/deploy-testnet.sh` | Wrapper: RPC chain-id check, fee mode per chain, key only from env. |
 | `script/check-nick-factory.sh` | Read-only `eth_getCode` of Nick's factory on all target chains. |
 
@@ -81,6 +81,34 @@ DEPLOYER_PRIVATE_KEY=$(security find-generic-password -s ai.rozo.forwarder-v2-de
 Networks: `ethereum base bnb arbitrum polygon hyperevm world arc celo` (override the RPC with `RPC_URL=`). BNB uses
 `--legacy`; Arc uses `--legacy --with-gas-price` with the 25 gwei floor; everything else uses EIP-1559 estimation.
 
+## Mainnet deployments (2026-10-25, deployer D2 `0xF54C…22cd`, main `a64708a` + this PR's wrapper fixes)
+
+All 9 chains read back after broadcast with `arc-cast code` / `arc-cast call` from an independent RPC call:
+F2 runtime hash `0x4a6726a2…64de`, P2 runtime hash `0x4c384edb…3641`, `P2.destination()` = hub, `F2.isParent(P2)` = true.
+
+| Chain | id | F2 tx (Nick's factory CREATE2) | P2 tx (`createForwarder(hub, 0)`) |
+| --- | --- | --- | --- |
+| Ethereum | 1 | `0x0034b3df38e4a15c1b1551da9884bb1f8fb58292785c7573d42f971a80380661` | `0x446e572a3e12903ce9792d57df25e00039ef508bff1cc19217b7e5f5737c676b` |
+| Base | 8453 | `0x8baf09275a70b27cdb5068d369a1b389a77a1649a86b6a3ac3d07a5e62161e7f` | `0xc1119cc91c151811976ad66fe1bf73c4a4b6e1c8c89ea135796c5e4c0cdeb716` |
+| BNB Chain | 56 | `0xea8225a085250f222fd99359898fc7467837beabda6f3387b6443275e351bf30` | `0xffe8dded653a7bf5f30d79532e12361f347e13673da896fa8b3b6ce53fbd9bbe` |
+| Arbitrum | 42161 | `0x5517745808aaa326dc819da87a084c58fa7633d89007b07f39d0e3c45cdd82bd` | `0x06145e955d711e69bcf6c6d7e68dc5ff82ffb76afd0b6419115b00a5ed0e1963` |
+| Polygon | 137 | `0xe950029f4820630c73b5039b6f0b0472f7507858241194430912095027848b1a` | `0x6c521e59b811f78b3ce399292cf30a5f73eea7a358deb3d03a14042af28cf785` |
+| HyperEVM | 999 | `0xc96a22b5a1470264a780456d68769833e47c92e6f658f28cef6807b627483d68` | `0xad384badd9c60db1b8071aeae46a6f66da9c1ab6e361f4ab6235dca83c1b67ab` |
+| World Chain | 480 | `0xf99faebf5861aa77729f6bab180e0f75c7d7df0122ccf064f39fb90cef452e42` | `0x21f741d8b699d86054d098e65e198f1bd7e08604ac90618114b15487870e5c87` |
+| Arc | 5042 | `0xaff535e8a1a30f101e220f9c08f7ee51873c4370a65a4440e223aa1679346e29` | `0x630eae3b9ddc5506c8de45e0ea4abc5270b42a82746e50662b056ef4527b17e3` |
+| Celo | 42220 | `0xf58236db5c758e048fd0f800bda1a30841e1cd8030ac4421b6be7088bb319b4c` | `0x11a00c006e6bbe4780910ffa9ea384efcd82de63930b20d8a18ffbe161073a0a` |
+
+Mainnet flush probe (`script/FlushDrill.s.sol`, label `test:20261025-mainnet`, erc20 clone `0xf297E8b316e33A4F83b9C6C5910B59615819c3D2`,
+native clone `0xa348F871b4c53A274b847153741F309360e917b2`, same on every chain):
+
+| Chain | Leg | Pay tx | Flush tx | Hub received (Transfer log) |
+| --- | --- | --- | --- | --- |
+| Base | USDC `0x8335…2913` | `0x1b1722b44b13b2b966e466b2746dcc42939537bddc64b1ce52aa04e073dd0fb8` | `0x88a0a0e786c5163ce1c2d5d7cf392982bbb8c3b491aa68b92805beb052b6500b` | 1.000000 USDC (hub 13525.916327 → 13526.916327) |
+
+Two wrapper fixes found during the deploy: a bare-hex key (no `0x`) was parsed as 0 by `vm.envOr` (`MissingDeployerKey`),
+so the wrapper now normalises the prefix; and on Arc `--with-gas-price` only sets the broadcast price, the simulation's
+`tx.gasprice` needs `--gas-price` too or `requireArcFee` rejects a valid run (`GasPriceTooLow(20.3 gwei, 25 gwei)`).
+
 ## Mainnet gas estimates (read-only `eth_estimateGas`, 2026-10-25; no mainnet broadcast was made)
 
 F2 deployment through Nick's factory estimates at **998,908 gas** on every chain (1,000,657 on Arbitrum).
@@ -124,7 +152,7 @@ Read-back after confirmation (`eth_getCode` / `eth_call`, not simulation):
 | `F2.isParent(P2)` | true | true | ✅ |
 | `keccak256(eth_getCode(P2))` | `0x4c384edb…3641` | `0x4c384edb…3641` | ✅ |
 
-Flush drill with real testnet USDC (`script/TestnetFlushDrill.s.sol`, label `test:20261025-arc`), both Arc USDC interfaces:
+Flush drill with real testnet USDC (`script/FlushDrill.s.sol`, label `test:20261025-arc`), both Arc USDC interfaces:
 
 | Leg | tx | hub delta (on chain) |
 | --- | --- | --- |
@@ -138,38 +166,24 @@ Dust findings (fork tests `test/ArcFork.t.sol`, confirmed by the drill): the nat
 including sub-micro-USDC dust; the ERC-20 view path moves `floor(balance / 1e12)` and leaves the dust on the
 clone, which a later `flushETH` sweeps. Flushing both interfaces never double-pays.
 
-### Base Sepolia (chainId 84532) — LIVE, read back, flush drill passed (2026-10-25)
+### Base Sepolia (chainId 84532) — NOT YET BROADCAST (blocked on gas, see below)
 
-F2 and P2 were broadcast through Nick's factory by the 10B/10C deployer wallet `0xf6DFE3f4…76EC`
-(same deterministic bytes, so the deploy script run from a second wallet found them and verified instead of redeploying,
-exactly the idempotent path it is tested for):
+Dry run against the live RPC passes (chain id read from RPC, Nick's runtime verified, F2 / P2 predicted and
+simulated at the same addresses as Arc testnet). The throwaway wallet has 0 ETH on Base Sepolia and every
+login-free faucet reachable from this machine was blocked on 2026-10-25:
 
-| Step | tx | Result |
-| --- | --- | --- |
-| F2 via Nick's factory | `0x7d354060956c7e7c5c71bbbc21db7cdbfcbb93180ec333263d0dbff11b265eb3` | status 1, gasUsed 981,001, block 49951782 (2026-10-25T07:10:25Z) |
-| P2 = `createForwarder(hub, 0)` | `0x66c61195355710cd728c4eb6b8bce52e73c6d66e3b4ce858b7e3977a38a69173` | status 1, gasUsed 416,530, block 49951785 |
+| Faucet | Result |
+| --- | --- |
+| Google Cloud Web3 faucet | no Base Sepolia network offered (only Ethereum Sepolia, Celo Sepolia, …) and requires Google sign-in |
+| Circle faucet | works for USDC only (no ETH) |
+| Bware Labs | HTTP 530 |
+| ethereum-ecosystem.com | HTTP 402 (paid) |
+| Triangle | HTTP 503 |
+| pk910 PoW faucet (Sepolia, then bridge) | Cloudflare Turnstile checkbox needs a human click |
+| Alchemy / QuickNode | require ≥ 0.001 ETH on Ethereum mainnet on the address |
 
-Read-back after confirmation (`eth_getCode` / `eth_call` against `https://sepolia.base.org`):
-
-| Check | On chain | Expected | ok |
-| --- | --- | --- | --- |
-| F2 address | `0xcfa4aff9A884F51997ceE2916b7D31aEE9aFb9f7` | same as Arc testnet | ✅ |
-| `keccak256(eth_getCode(F2))` | `0x4a6726a2…0564de` | `0x4a6726a2…0564de` | ✅ |
-| P2 address = `F2.getForwarderAddress(hub, 0)` | `0x7E9b8B4662EBB74Ad488E8F69705A27Bfb6EcFD8` | same | ✅ |
-| `P2.factory()` | `0xcfa4aff9…b9f7` | F2 | ✅ |
-| `P2.destination()` | `0x05c84533…2705` | hub | ✅ |
-| `F2.isParent(P2)` | true | true | ✅ |
-| `keccak256(eth_getCode(P2))` | `0x4c384edb…3641` | `0x4c384edb…3641` | ✅ |
-
-Flush drill with real Base Sepolia ETH (`script/TestnetFlushDrill.s.sol`, label `test:20261025-base`, native leg only;
-the drill wallet holds no Base Sepolia USDC, the ERC-20 path is covered by the Arc drill above and by unit tests):
-
-| Leg | tx | Result (on chain) |
-| --- | --- | --- |
-| pay 0.001 ETH to clone `0xeC4A0994…70A1` (no code yet) | `0xf5df3bf733cde7cbe4de7b29a981452438f866a7979fdf4f8178c8cdd5146423` | status 1, gasUsed 21,000 |
-| `cloneForwarderAndFlush(P2, salt, 0x0, false)` | `0xfd979d499ad75879d2b1501c1e5922ed6934c5c6abda6d067471c7f361d6bf50` | status 1, gasUsed 135,923; hub native 0 → 0.001 ETH; clone balance 0; clone code = 45-byte EIP-1167 runtime pointing at P2; `clone.destination()` = hub |
-
-Broadcast log: `broadcast/TestnetFlushDrill.s.sol/84532/run-latest.json`.
+To finish: send ≥ 0.005 Base Sepolia ETH to the drill wallet (or any wallet, then run the deploy with that key) and run
+`DEPLOYER_PRIVATE_KEY=… script/deploy-testnet.sh base_sepolia --broadcast`, then the read-back block above.
 
 ### Celo Sepolia (chainId 11142220) — 未验收 (not accepted)
 
