@@ -2,7 +2,7 @@
 # Testnet deploy wrapper for script/DeployV2.s.sol.
 #
 #   DEPLOYER_PRIVATE_KEY=... script/deploy-testnet.sh <base_sepolia|arc_testnet|celo_sepolia> [--broadcast]
-#   SCRIPT=script/TestnetFlushDrill.s.sol DRILL_NATIVE_WEI=... script/deploy-testnet.sh <net> [--broadcast]
+#   SCRIPT=script/FlushDrill.s.sol DRILL_NATIVE_WEI=... script/deploy-testnet.sh <net> [--broadcast]
 #
 # - The private key is read ONLY from the DEPLOYER_PRIVATE_KEY environment variable (the Solidity
 #   script reads it with vm.envUint). It is never placed in argv, echoed or written to disk.
